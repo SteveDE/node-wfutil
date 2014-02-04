@@ -10,7 +10,7 @@
 
 
 #include "lzf/lzf.h"
-#include "crc32/Crc32.h"
+#include "crc32/crc32.h"
 
 
 using namespace v8;
