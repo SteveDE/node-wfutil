@@ -1,0 +1,21 @@
+{
+    "name": "wfutil",
+    "version": "0.0.1",
+    "description": "lzf crc32 utils for nodejs",
+    "keywords": ["lzf", "compression", "buffer", "crc32"],
+    "author": "Thanks to: Ian Babrou <ibobrik@gmail.com>",
+    "engines": [
+        "node"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/SteveDE/node-wfutil.git"
+    },
+    "directories": {
+        "lib": "./lib"
+    },
+    "main": "./index",
+    "scripts": {
+        "test": "node test/test.js"
+    }
+}
