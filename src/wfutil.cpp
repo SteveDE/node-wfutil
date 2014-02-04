@@ -1,4 +1,5 @@
-/* node-lzf (C) 2011 Ian Babrou <ibobrik@gmail.com>  */
+/* lzf: (C) 2011 Ian Babrou <ibobrik@gmail.com>  */
+// wfutil
 
 #include <node_buffer.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 using namespace v8;
 using namespace node;
 
+typedef unsigned char uint8;
 
 Handle<Value> ThrowNodeError(const char* what = NULL) {
     return ThrowException(Exception::Error(String::New(what)));
@@ -95,10 +97,14 @@ Handle<Value> crc32(const Arguments& args) {
     uint32 prior = 0;
     if (args.Length() > 1 && args[1]->IsNumber()) {
         prior = args[1]->Uint32Value();
+        unsigned char* f = (unsigned char*)&prior;
+        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
     }
 
     uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
-    
+    unsigned char* f = (unsigned char*)&result;
+    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+
     return scope.Close(Number::New(result));
 }
 
