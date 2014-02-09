@@ -9,7 +9,9 @@
         "src/lzf/lzf.h",
         "src/lzf/lzfP.h",
         "src/crc32/crc32.h",
-        "src/crc32/crc32.cpp"
+        "src/crc32/crc32.cpp",
+        "src/whirlpool/whirlpool.h",
+        "src/whirlpool/whirlpool.cpp"
       ],
       'conditions': [
         [ 'OS=="linux" or OS=="freebsd" or OS=="openbsd" or OS=="solaris"', {

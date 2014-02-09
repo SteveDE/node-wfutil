@@ -12,6 +12,7 @@
 
 #include "lzf/lzf.h"
 #include "crc32/crc32.h"
+#include "whirlpool/whirlpool.h"
 
 
 using namespace v8;
@@ -108,12 +109,32 @@ Handle<Value> crc32(const Arguments& args) {
     return scope.Close(Number::New(result));
 }
 
+
+Handle<Value> whirlpool(const Arguments& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        return ThrowNodeError("First argument must be a Buffer");
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject();
+
+    Whirlpool wp;
+    WhirlpoolHash wh;
+
+    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
+    wp.Get(wh);
+
+    Buffer* BufferOut = Buffer::New((const char*)&wh.bytes[0], 64);
+
+    HandleScope scope;
+    return scope.Close(BufferOut->handle_);
+}
+
 extern "C" void
     init (Handle<Object> target) {
         NODE_SET_METHOD(target, "compress", compress);
         NODE_SET_METHOD(target, "decompress", decompress);
         NODE_SET_METHOD(target, "crc32", crc32);
+        NODE_SET_METHOD(target, "whirlpool", whirlpool);
 }
 
-NODE_MODULE(wfutil, init)
-
+NODE_MODULE(wfutil, init);

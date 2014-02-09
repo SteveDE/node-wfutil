@@ -15,8 +15,3 @@ var loremDecompressed = lzf.decompress(loremCompressed);
 assert.equal(loremDecompressed.toString(), lorem);
 console.log("test ok");
 
-var crc = lzf.crc32(loremBuffer);
-var crcS = lzf.crc32(loremBuffer, 223123);
-
-console.log("crc: " + crc + "  " + crcS);
-

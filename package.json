@@ -1,21 +1,40 @@
 {
-    "name": "wfutil",
-    "version": "0.0.2",
-    "description": "lzf crc32 utils for nodejs",
-    "keywords": ["lzf", "compression", "buffer", "crc32"],
-    "author": "Thanks to: Ian Babrou <ibobrik@gmail.com>",
-    "engines": [
-        "node"
-    ],
-    "repository": {
-        "type": "git",
-        "url": "git://github.com/SteveDE/node-wfutil.git"
-    },
-    "directories": {
-        "lib": "./lib"
-    },
-    "main": "./index",
-    "scripts": {
-        "test": "node test/test.js"
-    }
+  "name": "wfutil",
+  "version": "0.0.3",
+  "description": "lzf crc32 utils for nodejs",
+  "keywords": [
+    "lzf",
+    "compression",
+    "buffer",
+    "crc32",
+    "whirlpool"
+  ],
+  "author": {
+    "name": "Thanks to: Ian Babrou (ibobrik@gmail.com)",
+    "email": "ibobrik@gmail.com"
+  },
+  "engines": [
+    "node"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/SteveDE/node-wfutil.git"
+  },
+  "directories": {
+    "lib": "./lib"
+  },
+  "main": "./index",
+  "scripts": {
+    "test": "node test/test.js",
+    "install": "node-gyp rebuild"
+  },
+  "gypfile": true,
+  "readme": "## node-lzf\r\n\r\n[LZF](http://oldhome.schmorp.de/marc/liblzf.html) compression library for nodejs.\r\n\r\nLZF advantages:\r\n\r\n* Small code size (less then 500 lines including header files and docs).\r\n* Very fast compression speeds, rivaling a straight copy loop, especially for decompression which is basically at (unoptimized) memcpy-speed. Compression speed can be increased by 20% by sacrificing a few percent of compression ratio.\r\n* Mediocre compression ratios - you can usually expect about 40-50% compression for typical binary data\r\n* Easy to use (just two functions, no state attached)\r\n* Highly portable (written in C)\r\n* Tunable, see the file lzfP.h in the distribution, to tailor liblzf to your needs. The generated compressed blocks can be decompressed by any liblzf version regardless of the options used to compress.\r\n* Freely usable (BSD-type-license)\r\n\r\n### Usage\r\n\r\n```javascript\r\nvar lzf = require(\"lzf\");\r\n\r\n\r\nvar lorem = \"Lorem ipsum dolor sit amet, consectetur adipiscing elit.\" +\r\n    \"Curabitur volutpat, nulla nec egestas semper,\" +\r\n    \"ante dui tristique nibh, quis feugiat.\";\r\n\r\n// create buffer of your data\r\nvar loremBuffer = new Buffer(lorem);\r\n\r\n// compress your buffer and get another buffer\r\nvar loremCompressed = lzf.compress(loremBuffer);\r\n\r\n// decompress compressed buffer\r\nvar loremDecompressed = lzf.decompress(loremCompressed);\r\n\r\n```\r\n\r\n### Benchmarks\r\n\r\nBenchmarks against [compress-buffer](https://github.com/egorFiNE/node-compress-buffer) library. Just to be short: it's faster.\r\n\r\n```\r\nTesting compression at 100 bytes\r\nlzf-compress x 139,495 ops/sec ±11.88% (58 runs sampled)\r\nzlib-compress x 29,879 ops/sec ±6.88% (88 runs sampled)\r\nFastest is lzf-compress\r\n\r\nTesting decompression at 100 bytes\r\nlzf-decompress x 36,574 ops/sec ±7.74% (87 runs sampled)\r\nzlib-decompress x 26,153 ops/sec ±6.92% (89 runs sampled)\r\nFastest is lzf-decompress\r\n\r\nTesting compression at 1000 bytes\r\nlzf-compress x 57,345 ops/sec ±9.49% (81 runs sampled)\r\nzlib-compress x 11,828 ops/sec ±3.93% (60 runs sampled)\r\nFastest is lzf-compress\r\n\r\nTesting decompression at 1000 bytes\r\nlzf-decompress x 29,221 ops/sec ±7.06% (89 runs sampled)\r\nzlib-decompress x 19,351 ops/sec ±4.77% (92 runs sampled)\r\nFastest is lzf-decompress\r\n\r\nTesting compression at 10000 bytes\r\nlzf-compress x 10,512 ops/sec ±3.26% (92 runs sampled)\r\nzlib-compress x 1,850 ops/sec ±0.20% (73 runs sampled)\r\nFastest is lzf-compress\r\n\r\nTesting decompression at 10000 bytes\r\nlzf-decompress x 12,487 ops/sec ±3.85% (91 runs sampled)\r\nzlib-decompress x 6,939 ops/sec ±3.14% (93 runs sampled)\r\nFastest is lzf-decompress\r\n\r\nTesting compression at 100000 bytes\r\nlzf-compress x 1,628 ops/sec ±1.50% (96 runs sampled)\r\nzlib-compress x 132 ops/sec ±0.13% (93 runs sampled)\r\nFastest is lzf-compress\r\n\r\nTesting decompression at 100000 bytes\r\nlzf-decompress x 2,472 ops/sec ±1.09% (91 runs sampled)\r\nzlib-decompress x 1,430 ops/sec ±0.73% (95 runs sampled)\r\nFastest is lzf-decompress\r\n```\r\n\r\n---\r\n### Authors\r\n- Ian Babrou (ibobrik@gmail.com)\r\n",
+  "readmeFilename": "README.md",
+  "bugs": {
+    "url": "https://github.com/SteveDE/node-wfutil/issues"
+  },
+  "homepage": "https://github.com/SteveDE/node-wfutil",
+  "_id": "wfutil@0.0.2",
+  "_from": "wfutil@*"
 }
