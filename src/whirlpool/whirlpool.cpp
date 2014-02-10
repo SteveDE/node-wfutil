@@ -3,7 +3,6 @@
 #define ARRAY_COUNT(a)  (sizeof(a) / sizeof(a[0]))
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 

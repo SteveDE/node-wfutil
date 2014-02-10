@@ -1,6 +1,8 @@
 #ifndef WHIRLPOOL_H
 #define WHIRLPOOL_H
 
+#include <stdlib.h>
+
 typedef unsigned char uint8;
 typedef unsigned long long uint64;
 
