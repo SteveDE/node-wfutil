@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <iostream>
 #include <iomanip>
+#include <stdio.h>
+#include <string.h>
 
 #ifdef __APPLE__
 #include <malloc/malloc.h>
@@ -22,6 +24,9 @@ using namespace node;
 typedef unsigned char uint8;
 typedef unsigned short uint16;
 #define ARRAY_COUNT(a)  (sizeof(a) / sizeof(a[0]))
+
+static uint32 MakeVarIntLZF(uint32 usize, uint8 dst[5]);
+static uint32 GetVarIntLZF(const uint8* src, uint32& csize);
 
 Handle<Value> ThrowNodeError(const char* what = NULL) {
     return ThrowException(Exception::Error(String::New(what)));
@@ -131,9 +136,6 @@ Handle<Value> whirlpool(const Arguments& args) {
     HandleScope scope;
     return scope.Close(BufferOut->handle_);
 }
-
-uint32 MakeVarIntLZF(uint32 usize, uint8 dst[5]);
-uint32 GetVarIntLZF(const uint8* src, uint32& csize);
 
 Handle<Value> verifyPacket(const Arguments &args) {
     if (args.Length() < 2 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1])) {
