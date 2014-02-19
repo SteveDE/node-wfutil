@@ -1,4 +1,22 @@
 {
+    'target_defaults': {
+		'default_configuration': 'Release',
+		'configurations': {
+			'Release': {
+				'cflags': [ '-O3' ],
+				'xcode_settings': {
+					'GCC_OPTIMIZATION_LEVEL': '3',
+					'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
+				},
+				'msvs_settings': {
+					'VCCLCompilerTool': {
+						'Optimization': 3,
+						'FavorSizeOrSpeed': 1,
+					},
+				},
+			}
+		},
+	},
   "targets": [
     {
       "target_name": "wfutil",
@@ -12,16 +30,6 @@
         "src/crc32/crc32.cpp",
         "src/whirlpool/whirlpool.h",
         "src/whirlpool/whirlpool.cpp"
-      ],
-      'conditions': [
-        [ 'OS=="linux" or OS=="freebsd" or OS=="openbsd" or OS=="solaris"', {
-          'cflags': ['-O2']
-        }],
-        ['OS=="mac"', {
-          'xcode_settings': {
-            'OTHER_CFLAGS': ['-O2']
-          }
-        }]
       ]
     }
   ]

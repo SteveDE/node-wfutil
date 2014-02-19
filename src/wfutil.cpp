@@ -138,17 +138,20 @@ Handle<Value> whirlpool(const Arguments& args) {
 }
 
 Handle<Value> verifyPacket(const Arguments &args) {
-    if (args.Length() < 2 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1])) {
-        return ThrowNodeError("First 2 arguments must be Buffers");
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        return ThrowNodeError("First 3 arguments must be Buffers");
     }
 
     //std::cout << "verifyPacket: " << "\n";
 
     Local<Object> bufferIn = args[0]->ToObject();
     Local<Object> saltBuffer = args[1]->ToObject();
+    Local<Object> destBuffer = args[2]->ToObject();
 
-    size_t bytesIn         = Buffer::Length(bufferIn);
-    uint8* dataPointer     = (uint8*)Buffer::Data(bufferIn);
+    size_t bytesIn              = Buffer::Length(bufferIn);
+    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
+    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
 
     if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
         return Undefined();
@@ -196,38 +199,45 @@ Handle<Value> verifyPacket(const Arguments &args) {
 
     //std::cout << "crc: " << std::hex << crc << "\n";
 
-    if(expectedHash != crc) {
+    if(expectedHash != crc || destBytesSize < bytesIn) {
         //std::cout << "hashFail!\n";
         return Undefined();
     }
 
     //std::cout << "return new buffer: " << bytesIn << "\n";
 
-    Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
+    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
+    memcpy(destDataPointer, dataPointer, bytesIn);
+    
+    
     HandleScope scope;
-    return scope.Close(BufferOut->handle_);
+    return scope.Close(Number::New(bytesIn));
 }
 
 Handle<Value> conditionPacket(const Arguments &args) {
-    if (args.Length() < 2 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1])) {
-        return ThrowNodeError("First 2 arguments must be Buffers");
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        return ThrowNodeError("First 3 arguments must be Buffers");
     }
-
+    
     Local<Object> bufferIn = args[0]->ToObject();
     Local<Object> saltBuffer = args[1]->ToObject();
+    Local<Object> destBuffer = args[2]->ToObject();
 
     char* bytes = Buffer::Data(bufferIn);
     uint32 len = Buffer::Length(bufferIn);
-
-    if (len > 1400) {
+    
+    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+    
+    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
+    
+    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
         // MTU explosions
         return Undefined();
     }
-
-    // !! lots of endian assumptions here.
-    char packetBuffer[0x7fff]; // static packet decomp buffer.
     
-    uint8* outBytes = (uint8*)&packetBuffer;
+    // !! lots of endian assumptions here.
+    uint8* outBytes = packetBuffer;
     
     // compression header 1 byte compression header = 0 = no compression
     *outBytes = 0; outBytes++;
@@ -253,11 +263,13 @@ Handle<Value> conditionPacket(const Arguments &args) {
     crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
     *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
     
-    //std::cout << "crc: " << std::hex << *crcPtr << "\n";
+    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
 
-    Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
+    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
+    //HandleScope scope;
+    //return scope.Close(BufferOut->handle_);
     HandleScope scope;
-    return scope.Close(BufferOut->handle_);
+    return scope.Close(Number::New(totalBufferSize));
 }
 
 // varint size encoding needed for perl's LZF compression

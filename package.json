@@ -1,6 +1,6 @@
 {
   "name": "wfutil",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "lzf crc32 whirlpool utils for nodejs",
   "keywords": [
     "lzf",
@@ -10,7 +10,7 @@
     "whirlpool"
   ],
   "author": {
-    "name": "Steve Sinclair with thanks to: Ian Babrou (ibobrik@gmail.com)",
+    "name": "Steve Sinclair with thanks to: Ian Babrou",
     "email": "steve@digitalextremes.com"
   },
   "engines": [
@@ -34,5 +34,11 @@
   "bugs": {
     "url": "https://github.com/SteveDE/node-wfutil/issues"
   },
-  "homepage": "https://github.com/SteveDE/node-wfutil"
+  "homepage": "https://github.com/SteveDE/node-wfutil",
+  "_id": "wfutil@0.0.8",
+  "dist": {
+    "shasum": "b3322cc133756ad6eff24d279955313910914ac2"
+  },
+  "_from": "wfutil@*",
+  "_resolved": "https://registry.npmjs.org/wfutil/-/wfutil-0.0.8.tgz"
 }
