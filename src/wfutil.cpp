@@ -1,4 +1,10 @@
 /* lzf: (C) 2011 Ian Babrou <ibobrik@gmail.com>  */
+
+// TODO: joinProxyThread -- atexit is too late. maybe there is some libuv hook we can ask?
+// TODO: port to node12
+
+// TODO: implement abortProxy for abort (fish it out of the thread queue).
+
 // wfutil
 #include <node_version.h>
 #include <node_buffer.h>
@@ -12,11 +18,36 @@
 #include <malloc/malloc.h>
 #endif
 
+#ifdef __linux__
+#define ENABLE_PROXY
+#endif
 
 #include "lzf/lzf.h"
 #include "crc32/crc32.h"
 #include "whirlpool/whirlpool.h"
 
+#define StaticAssert(pred) switch(0){case 0:case pred:;}
+
+#ifdef ENABLE_PROXY
+
+#define ENABLE_ASYNC_PROXY
+#define COALESCE_PROXY_OPERATION
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-fpermissive"
+#pragma GCC diagnostic ignored "-pedantic"
+#include <libiptc/libiptc.h>
+#pragma GCC diagnostic pop
+
+#include <errno.h>
+#include <time.h>
+
+#include <linux/netfilter/xt_tcpudp.h>
+#include <linux/netfilter/nf_nat.h>
+
+#include <libnetfilter_conntrack/libnetfilter_conntrack.h>
+
+#endif
 
 using namespace v8;
 using namespace node;
@@ -25,8 +56,28 @@ typedef unsigned char uint8;
 typedef unsigned short uint16;
 #define ARRAY_COUNT(a)  (sizeof(a) / sizeof(a[0]))
 
-static uint32 MakeVarIntLZF(uint32 usize, uint8 dst[5]);
 static uint32 GetVarIntLZF(const uint8* src, uint32& csize);
+
+// Note arguments reordered for structure packing
+struct ProxySpec
+{
+    in_addr aAddr;
+    in_addr bAddr;
+    in_addr nAddr;
+    uint16_t aPort;
+    uint16_t bPort;
+    uint16_t anPort;
+    uint16_t bnPort;
+};
+
+std::ostream& operator<<(std::ostream& s, const ProxySpec& p)
+{
+    s << "(" << inet_ntoa(p.aAddr) << ":" << p.aPort;
+    s << ", " << inet_ntoa(p.bAddr) << ":" << p.bPort;
+    s << ", " << inet_ntoa(p.nAddr);
+    s << ", " << p.anPort << ", " << p.bnPort << ")";
+    return(s);
+}
 
 #if NODE_MINOR_VERSION >= 12
 Handle<Value> ThrowNodeError(const char* what = NULL) {
@@ -261,8 +312,6 @@ void conditionPacket(const FunctionCallbackInfo<Value>& args) {
     // hash header recall this position for hash
     uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
     
-    uint8* hashStart = outBytes;
-
     // connectionless header
     *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
     *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
@@ -504,8 +553,6 @@ Handle<Value> conditionPacket(const Arguments &args) {
     // hash header recall this position for hash
     uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
     
-    uint8* hashStart = outBytes;
-
     // connectionless header
     *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
     *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
@@ -530,61 +577,938 @@ Handle<Value> conditionPacket(const Arguments &args) {
     HandleScope scope;
     return scope.Close(Number::New(totalBufferSize));
 }
+
+static Handle<Value> readAddressArg(in_addr& out, const Local<Value>& arg)
+{
+    if(!arg->IsString())
+    {
+        return ThrowNodeError("Expected string argument");
+    }
+
+    String::AsciiValue str(arg->ToString());
+    
+    if(!inet_aton(*str, &out))
+    {
+        return ThrowNodeError("Expected IP-address argument");
+    }
+
+    return Handle<Value>();
+}
+
+static Handle<Value> readPortArg(uint16_t& out, const Local<Value>& arg)
+{
+    if(!arg->IsInt32())
+    {
+        return ThrowNodeError("Expected int argument");
+    }
+
+    // TODO: check for > 16bit?
+    out = static_cast<uint16_t>(arg->Int32Value());
+    return Handle<Value>();
+}
+
+static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<Function>* callback = NULL)
+{
+    if(callback)
+    {
+        if(args.Length() != 8)
+        {
+            return ThrowNodeError("proxy requires 8 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, callback ]");
+        }
+
+    }
+    else
+    {
+        if(args.Length() != 7)
+        {
+            return ThrowNodeError("proxy requires 7 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort ]");
+        }
+    }
+
+    int i = 0;
+
+    Handle<Value> error;
+    
+    error = readAddressArg(out.aAddr, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.aPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readAddressArg(out.bAddr, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.bPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+
+    error = readAddressArg(out.nAddr, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.anPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.bnPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+
+    if(callback)
+    {
+        if(!args[i]->IsFunction())
+        {
+            return ThrowNodeError("Expected function argument");
+        }
+
+        *callback = Local<Function>::Cast(args[i++]);
+    }
+
+    return Handle<Value>();
+}
+
+#ifndef ENABLE_PROXY
+static bool flushProxies()
+{
+    std::cout << "flushProxies() not enabled\n";
+    return(false);
+}
+static bool createProxy(const ProxySpec& proxy)
+{
+    std::cout << "createProxy" << proxy << " not enabled\n";
+    return(false);
+}
+static bool abortProxy(const ProxySpec& proxy)
+{
+    std::cout << "abortProxy" << proxy << " not enabled\n";
+    return(false);
+}
+static bool deleteProxy(const ProxySpec& proxy)
+{
+    std::cout << "deleteProxy" << proxy << " not enabled\n";
+    return(false);
+}
+#else // ENABLE_PROXY
+
+#pragma pack(push, 8) // __alignof__(struct _xt_align)
+struct NatEntry
+{
+    ipt_entry entry;
+    xt_entry_match match;
+    xt_udp udp;
+    // xt_standard_target target; for basic operations like ACCEPT/DROP
+    xt_entry_target target;
+    nf_nat_ipv4_multi_range_compat nat;
+};
+#pragma pack(pop)
+
+// Recycled to avoid initialization overhead
+static NatEntry sDnatEntry;
+static NatEntry sSnatEntry;
+static unsigned char sMatchMask[sizeof(NatEntry)];
+
+static void initNatEntry(NatEntry& e, const char* targetName)
+{
+    e.target.u.user.target_size = XT_ALIGN(sizeof(e.target)) + XT_ALIGN(sizeof(e.nat));
+    strncpy(e.target.u.user.name, targetName, sizeof(e.target.u.user.name));
+
+    e.entry.target_offset = offsetof(NatEntry, target);
+    e.entry.next_offset = e.entry.target_offset + e.target.u.user.target_size;
+
+    e.entry.ip.proto = IPPROTO_UDP;
+    e.entry.ip.smsk.s_addr = 0xFFFFFFFF;
+    e.entry.ip.dmsk.s_addr = 0xFFFFFFFF;
+
+    e.match.u.match_size = XT_ALIGN(sizeof(e.match)) + XT_ALIGN(sizeof(e.udp));
+    strncpy(e.match.u.user.name, "udp", sizeof(e.match.u.user.name));
+
+    e.nat.rangesize = 1;
+    e.nat.range[0].flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
+}
+
+static void initProxy()
+{
+    // Make sure that our payload will meet all of the alignment requirements
+    StaticAssert(offsetof(NatEntry, match) == XT_ALIGN(offsetof(NatEntry, match)));
+    StaticAssert(offsetof(NatEntry, match) == XT_ALIGN(offsetof(NatEntry, match)));
+    StaticAssert(offsetof(NatEntry, match) + offsetof(xt_entry_match, data) == XT_ALIGN(offsetof(NatEntry, udp)));
+    StaticAssert(offsetof(NatEntry, target) == XT_ALIGN(offsetof(NatEntry, target)));
+    StaticAssert(offsetof(NatEntry, target) + offsetof(xt_entry_target, data) == XT_ALIGN(offsetof(NatEntry, nat)));
+    StaticAssert(offsetof(NatEntry, nat) == XT_ALIGN(offsetof(NatEntry, nat)));
+
+    initNatEntry(sDnatEntry, "DNAT");
+    initNatEntry(sSnatEntry, "SNAT");
+
+    memset(sMatchMask, 255, sizeof(sMatchMask));
+}
+
+static void setNatRule(NatEntry& e, const in_addr& s, uint16_t sport, const in_addr& d, uint16_t dport, const in_addr& to, uint16_t toport)
+{
+    e.entry.ip.src = s;
+    e.udp.spts[0] = sport;
+    e.udp.spts[1] = sport;
+
+    e.entry.ip.dst = d;
+    e.udp.dpts[0] = dport;
+    e.udp.dpts[1] = dport;
+
+    e.nat.range[0].min_ip = to.s_addr;
+    e.nat.range[0].max_ip = to.s_addr;
+
+    __be16 toport16 = htons(toport);
+    e.nat.range[0].min.udp.port = toport16;
+    e.nat.range[0].max.udp.port = toport16;
+}
+
+static bool flushProxies()
+{
+    xtc_handle* h = iptc_init("nat");
+
+    if(!h)
+    {
+        std::cerr << "iptc_init: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    bool rc = true;
+
+    if
+    (
+        !iptc_flush_entries("INPUT", h) ||
+        !iptc_flush_entries("OUTPUT", h) ||
+        !iptc_flush_entries("PREROUTING", h) ||
+        !iptc_flush_entries("POSTROUTING", h)
+    )
+    {
+        std::cerr << "iptc_flush_entries: " << iptc_strerror(errno) << "\n";
+        rc = false;
+    }
+    else if(!iptc_commit(h))
+    {
+        std::cerr << "iptc_commit: " << iptc_strerror(errno) << "\n";
+        rc = false;
+    }
+
+    iptc_free(h);
+
+    if(!rc)
+    {
+        return(false);
+    }
+
+    nfct_handle* ct = nfct_open(CONNTRACK, 0);
+
+    if(!ct)
+    {
+        std::cerr << "nfct_open: " << strerror(errno) << "\n";
+        return(false);
+    }
+
+    u_int8_t family = AF_INET;
+
+    if(nfct_query(ct, NFCT_Q_FLUSH, &family) && (errno != ENOENT))
+    {
+        std::cerr << "nfct_query: " << strerror(errno) << "\n";
+        rc = false;
+    }
+
+    nfct_close(ct);
+
+    return(rc);
+}
+
+// NOTE: the original code was much more thorough:
+// conntrack -D -p udp -d $nAddr --dport $anPort > /dev/null 2>&1
+// conntrack -D -p udp -d $nAddr --dport $bnPort > /dev/null 2>&1
+// IE: It would flush just about anything involved with the proxy ports.
+//
+// Sadly NFCT_Q_DESTROY does not accept wildcards; the way conntrack is implemented it actually
+// scans the whole table which is probably very slow as the table size increases.
+//
+// The current code here deletes only the exact mappings that we intended; this is probably fine
+// because as far as I can tell even after we delete the rules and state stray packets from
+// a disconnecting host will still pop up in the table afterwards -- ie: overzealous flushing
+// my not be necessary.
+
+static bool flushProxyState(const ProxySpec& proxy)
+{
+    nf_conntrack* cta = nfct_new();
+    nf_conntrack* ctb = nfct_new();
+
+    if(!cta || !ctb)
+    {
+        std::cerr << "nfct_new: " << strerror(errno) << "\n";
+        // TODO: handle leaks
+        return(false);
+    }
+
+    nfct_set_attr_u8(cta, ATTR_L3PROTO, AF_INET);
+    nfct_set_attr_u32(cta, ATTR_IPV4_SRC, proxy.aAddr.s_addr);
+    nfct_set_attr_u32(cta, ATTR_IPV4_DST, proxy.nAddr.s_addr);
+    
+    nfct_set_attr_u8(cta, ATTR_L4PROTO, IPPROTO_UDP);
+    nfct_set_attr_u16(cta, ATTR_PORT_SRC, htons(proxy.aPort));
+    nfct_set_attr_u16(cta, ATTR_PORT_DST, htons(proxy.bnPort));
+
+    nfct_set_attr_u8(ctb, ATTR_L3PROTO, AF_INET);
+    nfct_set_attr_u32(ctb, ATTR_IPV4_SRC, proxy.bAddr.s_addr);
+    nfct_set_attr_u32(ctb, ATTR_IPV4_DST, proxy.nAddr.s_addr);
+    
+    nfct_set_attr_u8(ctb, ATTR_L4PROTO, IPPROTO_UDP);
+    nfct_set_attr_u16(ctb, ATTR_PORT_SRC, htons(proxy.bPort));
+    nfct_set_attr_u16(ctb, ATTR_PORT_DST, htons(proxy.anPort));
+
+    nfct_handle* h = nfct_open(CONNTRACK, 0);
+
+    bool rc = false;
+
+    if(!h)
+    {
+        std::cerr << "nfct_open: " << strerror(errno) << "\n";
+    }
+    else if
+    (
+        // ENOENT is returned if no connections match
+        (nfct_query(h, NFCT_Q_DESTROY, cta) && (errno != ENOENT)) ||
+        (nfct_query(h, NFCT_Q_DESTROY, ctb) && (errno != ENOENT))
+    )
+    {
+        std::cerr << "nfct_query: " << strerror(errno) << "\n";
+    }
+    else
+    {
+        rc = true;
+    }
+
+    nfct_close(h);
+    nfct_destroy(ctb);
+    nfct_destroy(cta);
+
+    return(rc);
+}
+
+static bool addProxyRules(xtc_handle* h, const ProxySpec& proxy)
+{
+    setNatRule(sDnatEntry, proxy.aAddr, proxy.aPort, proxy.nAddr, proxy.bnPort, proxy.bAddr, proxy.bPort);
+    
+    if(!iptc_insert_entry("PREROUTING", &sDnatEntry.entry, 0, h))
+    {
+        std::cerr << "iptc_insert_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    setNatRule(sDnatEntry, proxy.bAddr, proxy.bPort, proxy.nAddr, proxy.anPort, proxy.aAddr, proxy.aPort);
+    
+    if(!iptc_insert_entry("PREROUTING", &sDnatEntry.entry, 0, h))
+    {
+        std::cerr << "iptc_insert_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    setNatRule(sSnatEntry, proxy.aAddr, proxy.aPort, proxy.bAddr, proxy.bPort, proxy.nAddr, proxy.anPort);
+    
+    if(!iptc_append_entry("POSTROUTING", &sSnatEntry.entry, h))
+    {
+        std::cerr << "iptc_append_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    setNatRule(sSnatEntry, proxy.bAddr, proxy.bPort, proxy.bAddr, proxy.aPort, proxy.nAddr, proxy.bnPort);
+    
+    if(!iptc_append_entry("POSTROUTING", &sSnatEntry.entry, h))
+    {
+        std::cerr << "iptc_append_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    return(true);
+}
+
+static bool deleteProxyRules(xtc_handle* h, const ProxySpec& proxy)
+{
+    setNatRule(sDnatEntry, proxy.aAddr, proxy.aPort, proxy.nAddr, proxy.bnPort, proxy.bAddr, proxy.bPort);
+    
+    if(!iptc_delete_entry("PREROUTING", &sDnatEntry.entry, sMatchMask, h))
+    {
+        std::cerr << "iptc_delete_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    setNatRule(sDnatEntry, proxy.bAddr, proxy.bPort, proxy.nAddr, proxy.anPort, proxy.aAddr, proxy.aPort);
+    
+    if(!iptc_delete_entry("PREROUTING", &sDnatEntry.entry, sMatchMask, h))
+    {
+        std::cerr << "iptc_delete_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    setNatRule(sSnatEntry, proxy.aAddr, proxy.aPort, proxy.bAddr, proxy.bPort, proxy.nAddr, proxy.anPort);
+    
+    if(!iptc_delete_entry("POSTROUTING", &sSnatEntry.entry, sMatchMask, h))
+    {
+        std::cerr << "iptc_delete_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    setNatRule(sSnatEntry, proxy.bAddr, proxy.bPort, proxy.bAddr, proxy.aPort, proxy.nAddr, proxy.bnPort);
+    
+    if(!iptc_delete_entry("POSTROUTING", &sSnatEntry.entry, sMatchMask, h))
+    {
+        std::cerr << "iptc_delete_entry: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    return(true);
+}
+
+#ifndef ENABLE_ASYNC_PROXY
+// :PREROUTING - [0:0]
+// -I PREROUTING -p udp -s $aAddr --sport $aPort -d $nAddr --dport $bnPort -j DNAT --to $bAddr:$bPort
+// -I PREROUTING -p udp -s $bAddr --sport $bPort -d $nAddr --dport $anPort -j DNAT --to $aAddr:$aPort
+// :POSTROUTING - [0:0]
+// -A POSTROUTING -p udp -s $aAddr --sport $aPort -d $bAddr --dport $bPort -j SNAT --to $nAddr:$anPort
+// -A POSTROUTING -p udp -s $bAddr --sport $bPort -d $aAddr --dport $aPort -j SNAT --to $nAddr:$bnPort
+
+static bool createProxy(const ProxySpec& proxy)
+{
+    xtc_handle* h = iptc_init("nat");
+
+    if(!h)
+    {
+        std::cerr << "iptc_init: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    bool rc = true;
+        
+    if(!addProxyRules(h, proxy))
+    {
+        rc = false;
+    }
+    else if(!iptc_commit(h))
+    {
+        std::cerr << "iptc_commit: " << iptc_strerror(errno) << "\n";
+        rc = false;
+    }
+
+    iptc_free(h);
+
+    if(rc)
+    {
+        rc = flushProxyState(proxy);
+    }
+
+    return(rc);
+}
+
+static bool abortProxy(const ProxySpec&)
+{
+    return(false); // Not supported if sync
+}
+
+static bool deleteProxy(const ProxySpec& proxy)
+{
+    xtc_handle* h = iptc_init("nat");
+
+    if(!h)
+    {
+        std::cerr << "iptc_init: " << iptc_strerror(errno) << "\n";
+        return(false);
+    }
+
+    bool rc = true;
+        
+    if(!deleteProxyRules(h, proxy))
+    {
+        rc = false;
+    }
+    else if(!iptc_commit(h))
+    {
+        std::cerr << "iptc_commit: " << iptc_strerror(errno) << "\n";
+        rc = false;
+    }
+
+    iptc_free(h);
+
+    if(rc)
+    {
+        rc = flushProxyState(proxy);
+    }
+
+    return(rc);
+}
+#else // ENABLE_ASYNC_PROXY
+
+#define READWRITE_BARRIER() asm volatile("" ::: "memory")
+
+struct AsyncProxy;
+struct AsyncProxy
+{
+    ProxySpec spec;
+    bool add; // or delete
+    bool result;
+    Persistent<Function> callback;
+    uv_work_t work;
+    timespec submitted;
+    AsyncProxy* volatile next;
+};
+
+class AsyncProxyQueue
+{
+public:
+    AsyncProxyQueue() :
+        mBegin(NULL),
+        mEnd(NULL)
+    {
+        uv_mutex_init(&mMutex);
+        uv_sem_init(&mPending, 0);
+    }
+
+    ~AsyncProxyQueue()
+    {
+        uv_sem_destroy(&mPending);
+        uv_mutex_destroy(&mMutex);
+    }
+
+    void push(AsyncProxy* p)
+    {
+        uv_mutex_lock(&mMutex); 
+        READWRITE_BARRIER();
+
+        p->next = NULL;
+
+        if(mEnd)
+        {
+            mEnd->next = p;
+        }
+        else
+        {
+            mBegin = p;
+        }
+
+        mEnd = p;
+
+        READWRITE_BARRIER();
+        uv_mutex_unlock(&mMutex); 
+
+        uv_sem_post(&mPending);
+    }
+
+    AsyncProxy* pop()
+    {
+        AsyncProxy* next;
+
+        uv_sem_wait(&mPending);
+
+        uv_mutex_lock(&mMutex); 
+        READWRITE_BARRIER();
+
+        next = mBegin;
+
+        mBegin = next->next;
+
+        if(!mBegin)
+        {
+            mEnd = NULL;
+        }
+
+        READWRITE_BARRIER();
+        uv_mutex_unlock(&mMutex); 
+
+        return(next);
+    }
+
+    AsyncProxy* tryPop()
+    {
+        AsyncProxy* next;
+
+        if(uv_sem_trywait(&mPending))
+        {
+            return(NULL);
+        }
+
+        uv_mutex_lock(&mMutex); 
+        READWRITE_BARRIER();
+
+        next = mBegin;
+
+        mBegin = next->next;
+
+        if(!mBegin)
+        {
+            mEnd = NULL;
+        }
+
+        READWRITE_BARRIER();
+        uv_mutex_unlock(&mMutex); 
+
+        return(next);
+    }
+
+private:
+    uv_sem_t mPending;
+    uv_mutex_t mMutex;
+
+    AsyncProxy* volatile mBegin;
+    AsyncProxy* volatile mEnd;
+};
+
+static uv_thread_t sProxyThread;
+static AsyncProxyQueue sProxyQueue;
+
+void emptyWork(uv_work_t*) { }
+void dispachCallback(uv_work_t* req, int)
+{
+    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(ap->result)) };
+
+    TryCatch try_catch;
+    ap->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+    ap->callback.Dispose();
+    delete ap; // NOTE: this trashes the work item; will lib UV hate us? judging from src looks okay
+}
+
+#ifdef COALESCE_PROXY_OPERATION
+
+static uint64_t nanoseconds(const timespec& ts)
+{
+    return((1000000000ULL * ts.tv_sec) + ts.tv_nsec);
+}
+
+static void proxyLoop(void*)
+{
+    bool run = true;
+    while(run)
+    {
+        AsyncProxy* first = sProxyQueue.pop();
+
+        if(!first)
+        {
+            run = false;
+            break;
+        }
+
+        timespec batchStart;
+        clock_gettime(CLOCK_MONOTONIC, &batchStart);
+
+        xtc_handle* h = iptc_init("nat");
+        bool rc = true;
+
+        if(!h)
+        {
+            std::cerr << "iptc_init: " << iptc_strerror(errno) << "\n";
+            first->result = false; 
+            first->next = NULL;
+        }
+        else
+        {
+            // Allow up for some multiple the iptc_init time to accumulate operations;
+            // this allows us to batch more when the table is very full but keeps latency
+            // from getting out of control.
+
+            timespec initEnd;
+            clock_gettime(CLOCK_MONOTONIC, &initEnd);
+
+            uint64_t batchStartNS = nanoseconds(batchStart);
+            uint64_t batchCutoff = batchStartNS + 2 * (nanoseconds(initEnd) - batchStartNS);
+
+            AsyncProxy* ap = first;
+            AsyncProxy* prev = NULL;
+            int n = 0;
+
+            do
+            {
+                if(prev)
+                {
+                    prev->next = ap;
+                }
+
+                ap->next = NULL;
+                prev = ap;
+                ++n;
+
+                if(ap->add)
+                {
+                    ap->result = addProxyRules(h, ap->spec);
+                }
+                else
+                {
+                    ap->result = deleteProxyRules(h, ap->spec);
+                }
+
+                if(!ap->result)
+                {
+                    rc = false;
+                    break;
+                }
+
+                timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+
+                if(nanoseconds(now) > batchCutoff)
+                {
+                    break;
+                }
+
+                ap = sProxyQueue.tryPop();
+            } while(ap);
+
+            if(rc && !iptc_commit(h))
+            {
+                std::cerr << "iptc_commit: " << iptc_strerror(errno) << "\n";
+                rc = false;
+                
+                for(AsyncProxy* it = first; it; it = it->next)
+                {
+                    it->result = false;
+                }
+            }
+
+            if(n)
+            {
+                timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                uint64_t nowNS = nanoseconds(now);
+                uint64_t latency = (nowNS - nanoseconds(prev->submitted)) / 1000000;
+                uint64_t throughput = (n * 1000000000ULL) / (nowNS - batchStartNS);
+                std::cout << "Commited " << n << " proxy ops in one batch (latency: " << latency << "ms, " << throughput << " p/s)\n";
+            }
+
+            iptc_free(h);
+        }
+
+        for(AsyncProxy* it = first; it; it = it->next)
+        {
+            it->result = it->result && flushProxyState(it->spec);
+        }
+
+        for(AsyncProxy* it = first; it;)
+        {
+            AsyncProxy* next = it->next;
+
+            if(it->callback.IsEmpty())
+            {
+                delete it;
+            }
+            else
+            {
+                // This is ghetto but I'm not sure the best way to put the callbacks in the main thread?
+                it->work.data = it;
+                uv_queue_work(uv_default_loop(), &it->work, emptyWork, dispachCallback);
+            }
+
+            it = next;
+        }
+        
+    }
+}
+#else // !COALESCE_PROXY_OPERATION
+static void proxyLoop(void*)
+{
+    bool run = true;
+    while(run)
+    {
+        AsyncProxy* ap = sProxyQueue.pop();
+
+        if(!ap)
+        {
+            run = false;
+            break;
+        }
+
+        const ProxySpec& proxy = ap->spec;
+
+        xtc_handle* h = iptc_init("nat");
+
+        if(!h)
+        {
+            std::cerr << "iptc_init: " << iptc_strerror(errno) << "\n";
+            ap->result = false; 
+        }
+        else
+        {
+            if(ap->add)
+            {
+                ap->result = addProxyRules(h, proxy);
+            }
+            else
+            {
+                ap->result = deleteProxyRules(h, proxy);
+            }
+
+            if(ap->result && !iptc_commit(h))
+            {
+                std::cerr << "iptc_commit: " << iptc_strerror(errno) << "\n";
+                ap->result = false; 
+            }
+
+            iptc_free(h);
+        }
+
+        if(ap->result)
+        {
+            ap->result = flushProxyState(proxy);
+        }
+        
+        if(ap->callback.IsEmpty())
+        {
+            delete ap;
+        }
+        else
+        {
+            // This is ghetto but I'm not sure the best way to put the callbacks in the main thread?
+            ap->work.data = ap;
+            uv_queue_work(uv_default_loop(), &ap->work, emptyWork, dispachCallback);
+        }
+    }
+}
+#endif // !COALESCE_PROXY_OPERATION
+
+// TODO: push NULL isn't quit right
+// because tryPop returning NULL is indestinguishable -- need sentinel
+// static void joinProxyThread()
+// {
+//     sProxyQueue.push(NULL);
+//     uv_thread_join(&sProxyThread);
+// }
+
+static void initAsyncProxy()
+{
+    uv_thread_create(&sProxyThread, proxyLoop, NULL);
+}
+
+static bool createProxy(const ProxySpec& proxy, const Local<Function>& callback)
+{
+    AsyncProxy* async = new AsyncProxy;
+    async->spec = proxy;
+    async->add = true;
+    async->callback = Persistent<Function>::New(callback);
+    clock_gettime(CLOCK_MONOTONIC, &async->submitted);
+    sProxyQueue.push(async);
+    return(true);
+}
+
+static bool abortProxy(const ProxySpec&)
+{
+    return(false);
+}
+static bool deleteProxy(const ProxySpec& proxy)
+{
+    AsyncProxy* async = new AsyncProxy;
+    async->spec = proxy;
+    async->add = false;
+    clock_gettime(CLOCK_MONOTONIC, &async->submitted);
+    sProxyQueue.push(async);
+    return(false);
+}
+#endif // ENABLE_ASYNC_PROXY
+#endif // ENABLE_PROXY 
+
+Handle<Value> flushProxies(const Arguments& args) {
+    if(args.Length() != 0) {
+        return ThrowNodeError("flush proxies takes no argument");
+    }
+    
+    HandleScope scope;
+    return scope.Close(Boolean::New(flushProxies()));
+}
+
+Handle<Value> createProxy(const Arguments& args) {
+    ProxySpec proxy;
+    Local<Function> callback;
+
+    Handle<Value> error = readProxyArgs(proxy, args, &callback);
+    if(!error.IsEmpty()) { return(error); }
+
+#ifdef ENABLE_ASYNC_PROXY
+    createProxy(proxy, callback);
+#else
+    bool result = createProxy(proxy);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(result)) };
+
+    callback->Call(Context::GetCurrent()->Global(), argc, argv);
 #endif
+
+    HandleScope scope;
+    return scope.Close(Undefined());
+}
+
+Handle<Value> abortProxy(const Arguments& args)
+{
+    ProxySpec proxy;
+
+    Handle<Value> error = readProxyArgs(proxy, args);
+    if(!error.IsEmpty()) { return(error); }
+
+    HandleScope scope;
+    return scope.Close(Boolean::New(abortProxy(proxy)));
+}
+
+Handle<Value> deleteProxy(const Arguments& args)
+{
+    ProxySpec proxy;
+
+    Handle<Value> error = readProxyArgs(proxy, args);
+    if(!error.IsEmpty()) { return(error); }
+
+    HandleScope scope;
+    return scope.Close(Boolean::New(deleteProxy(proxy)));
+}
+#endif // NODE_MINOR_VERSION < 12
 
 // varint size encoding needed for perl's LZF compression
 // NOTE: I am matching the LZF version but it is wrong for for large packet sizes (e.g. usize <= 0x7fffffff is wrong, varint of 0xffffffff fits in 5 bytes!)
 
-inline static uint8 TruncateByte(uint32 b)
-{
-    return(static_cast<uint8>(b & 0xff));
-}
-
-static uint32 MakeVarIntLZF(uint32 usize, uint8 dst[5])
-{
-    uint32 skip = 0;
-
-    if(usize <= 0x7f)
-    {
-        dst[skip++] = TruncateByte(usize);
-    }
-    else if(usize <= 0x7ff) 
-    {
-        dst[skip++] = TruncateByte(( usize >>  6)         | 0xc0);
-        dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
-    }
-    else if(usize <= 0xffff) 
-    {
-        dst[skip++] = TruncateByte(( usize >> 12)         | 0xe0);
-        dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
-    }
-    else if(usize <= 0x1fffff) 
-    {
-        dst[skip++] = TruncateByte(( usize >> 18)         | 0xf0);
-        dst[skip++] = TruncateByte(((usize >> 12) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
-    }
-    else if(usize <= 0x3ffffff) 
-    {
-        dst[skip++] = TruncateByte(( usize >> 24)         | 0xf8);
-        dst[skip++] = TruncateByte(((usize >> 18) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(((usize >> 12) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
-    }
-    else if(usize <= 0x7fffffff) 
-    {
-        dst[skip++] = TruncateByte(( usize >> 30)         | 0xfc);
-        dst[skip++] = TruncateByte(((usize >> 24) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(((usize >> 18) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(((usize >> 12) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
-        dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
-    }
-    return(skip);
-}
+// inline static uint8 TruncateByte(uint32 b)
+// {
+//     return(static_cast<uint8>(b & 0xff));
+// }
+// 
+// static uint32 MakeVarIntLZF(uint32 usize, uint8 dst[5])
+// {
+//     uint32 skip = 0;
+// 
+//     if(usize <= 0x7f)
+//     {
+//         dst[skip++] = TruncateByte(usize);
+//     }
+//     else if(usize <= 0x7ff) 
+//     {
+//         dst[skip++] = TruncateByte(( usize >>  6)         | 0xc0);
+//         dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
+//     }
+//     else if(usize <= 0xffff) 
+//     {
+//         dst[skip++] = TruncateByte(( usize >> 12)         | 0xe0);
+//         dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
+//     }
+//     else if(usize <= 0x1fffff) 
+//     {
+//         dst[skip++] = TruncateByte(( usize >> 18)         | 0xf0);
+//         dst[skip++] = TruncateByte(((usize >> 12) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
+//     }
+//     else if(usize <= 0x3ffffff) 
+//     {
+//         dst[skip++] = TruncateByte(( usize >> 24)         | 0xf8);
+//         dst[skip++] = TruncateByte(((usize >> 18) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(((usize >> 12) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
+//     }
+//     else if(usize <= 0x7fffffff) 
+//     {
+//         dst[skip++] = TruncateByte(( usize >> 30)         | 0xfc);
+//         dst[skip++] = TruncateByte(((usize >> 24) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(((usize >> 18) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(((usize >> 12) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(((usize >>  6) & 0x3f) | 0x80);
+//         dst[skip++] = TruncateByte(( usize        & 0x3f) | 0x80);
+//     }
+//     return(skip);
+// }
 
 static uint32 GetVarIntLZF(const uint8* src, uint32& csize)
 {
@@ -646,14 +1570,25 @@ static uint32 GetVarIntLZF(const uint8* src, uint32& csize)
     return(usize);
 }
 
-extern "C" void
-    init (Handle<Object> target) {
-        NODE_SET_METHOD(target, "compress", compress);
-        NODE_SET_METHOD(target, "decompress", decompress);
-        NODE_SET_METHOD(target, "crc32", crc32);
-        NODE_SET_METHOD(target, "whirlpool", whirlpool);
-        NODE_SET_METHOD(target, "verifyPacket", verifyPacket);
-        NODE_SET_METHOD(target, "conditionPacket", conditionPacket);
+extern "C" void init (Handle<Object> target)
+{
+#ifdef ENABLE_PROXY
+    initProxy();
+#ifdef ENABLE_ASYNC_PROXY
+    initAsyncProxy();
+#endif
+#endif
+
+    NODE_SET_METHOD(target, "compress", compress);
+    NODE_SET_METHOD(target, "decompress", decompress);
+    NODE_SET_METHOD(target, "crc32", crc32);
+    NODE_SET_METHOD(target, "whirlpool", whirlpool);
+    NODE_SET_METHOD(target, "verifyPacket", verifyPacket);
+    NODE_SET_METHOD(target, "conditionPacket", conditionPacket);
+    NODE_SET_METHOD(target, "flushProxies", flushProxies);
+    NODE_SET_METHOD(target, "createProxy", createProxy);
+    NODE_SET_METHOD(target, "abortProxy", abortProxy);
+    NODE_SET_METHOD(target, "deleteProxy", deleteProxy);
 }
 
-NODE_MODULE(wfutil, init);
+NODE_MODULE(wfutil, init)
