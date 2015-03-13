@@ -1,6 +1,6 @@
 {
   "name": "wfutil",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "lzf crc32 whirlpool utils for nodejs (node10/12)",
   "keywords": [
     "lzf",
@@ -29,16 +29,27 @@
     "install": "node-gyp rebuild"
   },
   "gypfile": true,
-  "readme": "native bindings for crc32, whirlpool, lzf",
-  "readmeFilename": "README.md",
   "bugs": {
     "url": "https://github.com/SteveDE/node-wfutil/issues"
   },
   "homepage": "https://github.com/SteveDE/node-wfutil",
-  "_id": "wfutil@0.0.12",
+  "_id": "wfutil@0.0.13",
   "dist": {
-    "shasum": "b3322cc133756ad6eff24d279955313910914ac2"
+    "shasum": "6ae684435742958f968949bf9d882f6d42b26ea6",
+    "tarball": "http://registry.npmjs.org/wfutil/-/wfutil-0.0.12.tgz"
   },
-  "_from": "wfutil@*",
-  "_resolved": "https://registry.npmjs.org/wfutil/-/wfutil-0.0.8.tgz"
+  "_from": "wfutil@>= 0.0.11",
+  "_resolved": "https://registry.npmjs.org/wfutil/-/wfutil-0.0.12.tgz",
+  "_npmVersion": "1.4.3",
+  "_npmUser": {
+    "name": "steve_de",
+    "email": "steve@digitalextremes.com"
+  },
+  "maintainers": [
+    {
+      "name": "steve_de",
+      "email": "steve@digitalextremes.com"
+    }
+  ],
+  "_shasum": "6ae684435742958f968949bf9d882f6d42b26ea6"
 }

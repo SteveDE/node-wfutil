@@ -46,8 +46,19 @@
 #include <errno.h>
 #include <time.h>
 
-#include <linux/netfilter/xt_tcpudp.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,13,0)
+#define OLD_NETFILTER
+#endif
+
+#ifdef OLD_NETFILTER
+#include <linux/netfilter_ipv4/nf_nat.h>
+#else
 #include <linux/netfilter/nf_nat.h>
+#endif
+
+#include <linux/netfilter/xt_tcpudp.h>
 
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
@@ -699,7 +710,11 @@ struct NatEntry
     xt_udp udp;
     // xt_standard_target target; for basic operations like ACCEPT/DROP
     xt_entry_target target;
+#ifdef OLD_NETFILTER
+    nf_nat_multi_range_compat nat;
+#else
     nf_nat_ipv4_multi_range_compat nat;
+#endif
 };
 #pragma pack(pop)
 
@@ -724,7 +739,12 @@ static void initNatEntry(NatEntry& e, const char* targetName)
     strncpy(e.match.u.user.name, "udp", sizeof(e.match.u.user.name));
 
     e.nat.rangesize = 1;
+
+#ifdef OLD_NETFILTER
+    e.nat.range[0].flags = IP_NAT_RANGE_MAP_IPS | IP_NAT_RANGE_PROTO_SPECIFIED;
+#else
     e.nat.range[0].flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
+#endif
 }
 
 static void initProxy()
