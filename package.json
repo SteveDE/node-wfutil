@@ -1,6 +1,6 @@
 {
   "name": "wfutil",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "description": "lzf crc32 whirlpool utils for nodejs (node10/12)",
   "keywords": [
     "lzf",
@@ -35,7 +35,7 @@
     "url": "https://github.com/SteveDE/node-wfutil/issues"
   },
   "homepage": "https://github.com/SteveDE/node-wfutil",
-  "_id": "wfutil@0.0.11",
+  "_id": "wfutil@0.0.12",
   "dist": {
     "shasum": "b3322cc133756ad6eff24d279955313910914ac2"
   },
