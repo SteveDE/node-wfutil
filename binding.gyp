@@ -43,6 +43,11 @@
                         '-lnetfilter_conntrack'
                     ]
                 }],
+                ['OS=="win"', {
+                    "libraries": [
+                        'ws2_32.lib'
+                    ]
+                }],
             ]
         }
     ]

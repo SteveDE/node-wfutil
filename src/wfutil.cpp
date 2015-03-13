@@ -22,6 +22,10 @@
 #define ENABLE_PROXY
 #endif
 
+#ifdef _WIN32
+#include <Winsock2.h>
+#endif
+
 #include "lzf/lzf.h"
 #include "crc32/crc32.h"
 #include "whirlpool/whirlpool.h"
@@ -350,12 +354,12 @@ Handle<Value> compress(const Arguments& args) {
     HandleScope scope;
 
     Local<Object> bufferIn = args[0]->ToObject();
-    size_t bytesIn         = Buffer::Length(bufferIn);
+    unsigned bytesIn       = static_cast<unsigned>(Buffer::Length(bufferIn));
     char * dataPointer     = Buffer::Data(bufferIn);
-    size_t bytesCompressed = bytesIn + 100;
+    unsigned bytesCompressed = bytesIn + 100;
     char * bufferOut        = (char*) malloc(bytesCompressed);
 
-    unsigned result = lzf_compress(dataPointer, bytesIn, bufferOut, bytesCompressed);
+    unsigned result = lzf_compress(dataPointer, static_cast<unsigned int>(bytesIn), bufferOut, bytesCompressed);
 
     if (!result) {
         free(bufferOut);
@@ -375,7 +379,7 @@ Handle<Value> decompress(const Arguments &args) {
 
     Local<Object> bufferIn = args[0]->ToObject();
 
-    size_t bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
+    unsigned bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
 
     if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
         bytesUncompressed = args[1]->Uint32Value();
@@ -387,7 +391,7 @@ Handle<Value> decompress(const Arguments &args) {
         return ThrowNodeError("LZF malloc failed!");
     }
 
-    unsigned result = lzf_decompress(Buffer::Data(bufferIn), Buffer::Length(bufferIn), bufferOut, bytesUncompressed);
+    unsigned result = lzf_decompress(Buffer::Data(bufferIn), static_cast<unsigned>(Buffer::Length(bufferIn)), bufferOut, bytesUncompressed);
 
     if (!result) {
         return Undefined();
@@ -465,7 +469,7 @@ Handle<Value> verifyPacket(const Arguments &args) {
         return Undefined();
     }
 
-    uint32 csize = bytesIn;
+    uint32 csize = static_cast<uint32>(bytesIn);
     uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
     
     uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
@@ -517,9 +521,8 @@ Handle<Value> verifyPacket(const Arguments &args) {
     //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
     memcpy(destDataPointer, dataPointer, bytesIn);
     
-    
     HandleScope scope;
-    return scope.Close(Number::New(bytesIn));
+    return scope.Close(Number::New(static_cast<double>(bytesIn)));
 }
 
 Handle<Value> conditionPacket(const Arguments &args) {
@@ -532,7 +535,7 @@ Handle<Value> conditionPacket(const Arguments &args) {
     Local<Object> destBuffer = args[2]->ToObject();
 
     char* bytes = Buffer::Data(bufferIn);
-    uint32 len = Buffer::Length(bufferIn);
+    uint32 len = static_cast<uint32>(Buffer::Length(bufferIn));
     
     uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
     size_t destBytesSize     = Buffer::Length(destBuffer);
@@ -575,7 +578,7 @@ Handle<Value> conditionPacket(const Arguments &args) {
     //HandleScope scope;
     //return scope.Close(BufferOut->handle_);
     HandleScope scope;
-    return scope.Close(Number::New(totalBufferSize));
+    return scope.Close(Number::New(static_cast<double>(totalBufferSize)));
 }
 
 static Handle<Value> readAddressArg(in_addr& out, const Local<Value>& arg)
@@ -586,8 +589,10 @@ static Handle<Value> readAddressArg(in_addr& out, const Local<Value>& arg)
     }
 
     String::AsciiValue str(arg->ToString());
+
+    out.s_addr = inet_addr(*str);
     
-    if(!inet_aton(*str, &out))
+    if(out.s_addr == INADDR_NONE)
     {
         return ThrowNodeError("Expected IP-address argument");
     }
