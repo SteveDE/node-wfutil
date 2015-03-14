@@ -841,7 +841,11 @@ static bool createProxy(const ProxySpec& proxy, const Local<Function>& callback)
     AsyncProxy* async = new AsyncProxy;
     async->spec = proxy;
     async->add = true;
-    async->callback.Reset(Isolate::GetCurrent(), callback); 
+#if NODE_MINOR_VERSION >= 12
+    async->callback.Reset(Isolate::GetCurrent(), callback);
+#else
+    async->callback = Persistent<Function>::New(callback);
+#endif
     clock_gettime(CLOCK_MONOTONIC, &async->submitted);
     sProxyQueue.push(async);
     return(true);
