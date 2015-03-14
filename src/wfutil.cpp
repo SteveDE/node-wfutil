@@ -20,6 +20,8 @@
 
 #ifdef __linux__
 #define ENABLE_PROXY
+#include <arpa/inet.h>
+#include <uv.h>
 #endif
 
 #ifdef _WIN32
@@ -92,591 +94,6 @@ std::ostream& operator<<(std::ostream& s, const ProxySpec& p)
     s << ", " << inet_ntoa(p.nAddr);
     s << ", " << p.anPort << ", " << p.bnPort << ")";
     return(s);
-}
-
-#if NODE_MINOR_VERSION >= 12
-Handle<Value> ThrowNodeError(const char* what = NULL) {
-    return Isolate::GetCurrent()->ThrowException(Exception::Error(String::NewFromUtf8(v8::Isolate::GetCurrent(), what)));
-}
-
-void compress(const FunctionCallbackInfo<Value>& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
-        return;
-    }
-
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-    HandleScope scope(isolate);
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    size_t bytesIn         = Buffer::Length(bufferIn);
-    char * dataPointer     = Buffer::Data(bufferIn);
-    size_t bytesCompressed = bytesIn + 100;
-    char * bufferOut        = (char*) malloc(bytesCompressed);
-
-    unsigned result = lzf_compress(dataPointer, bytesIn, bufferOut, bytesCompressed);
-
-    if (!result) {
-        free(bufferOut);
-        args.GetReturnValue().Set(Undefined(v8::Isolate::GetCurrent()));
-        return;
-    }
-
-    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
-    free(bufferOut);
-
-    args.GetReturnValue().Set(resultBuffer);
-}
-
-void decompress(const FunctionCallbackInfo<Value>& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
-        return;
-    }
-
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-
-    Local<Object> bufferIn = args[0]->ToObject();
-
-    size_t bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
-
-    if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
-        bytesUncompressed = args[1]->Uint32Value();
-    }
-
-
-    char * bufferOut = (char*) malloc(bytesUncompressed);
-    if (!bufferOut) {
-        args.GetReturnValue().Set(ThrowNodeError("LZF malloc failed!"));
-        return;
-    }
-
-    unsigned result = lzf_decompress(Buffer::Data(bufferIn), Buffer::Length(bufferIn), bufferOut, bytesUncompressed);
-
-    if (!result) {
-        args.GetReturnValue().Set(Undefined(isolate));
-        return;
-    }
-
-    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
-
-    free(bufferOut);
-
-    args.GetReturnValue().Set(resultBuffer);
-}
-
-void crc32(const FunctionCallbackInfo<Value>& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
-        return;
-    }
-
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-    HandleScope scope(isolate);
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    size_t bytesIn         = Buffer::Length(bufferIn);
-    char * dataPointer     = Buffer::Data(bufferIn);
-
-    uint32 prior = 0;
-    if (args.Length() > 1 && args[1]->IsNumber()) {
-        prior = args[1]->Uint32Value();
-        unsigned char* f = (unsigned char*)&prior;
-        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
-    }
-
-    uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
-    unsigned char* f = (unsigned char*)&result;
-    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
-
-    args.GetReturnValue().Set(Number::New(isolate, result));
-}
-
-void whirlpool(const FunctionCallbackInfo<Value>& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
-        return;
-    }
-
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-    Local<Object> bufferIn = args[0]->ToObject();
-
-    Whirlpool wp;
-    WhirlpoolHash wh;
-
-    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
-    wp.Get(wh);
-
-    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, (const char*)&wh.bytes[0], 64);
-    args.GetReturnValue().Set(resultBuffer);
-}
-
-void verifyPacket(const FunctionCallbackInfo<Value>& args) {
-    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
-        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
-        return;
-    }
-
-    //std::cout << "verifyPacket: " << "\n";
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    Local<Object> saltBuffer = args[1]->ToObject();
-    Local<Object> destBuffer = args[2]->ToObject();
-
-    size_t bytesIn              = Buffer::Length(bufferIn);
-    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
-    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
-    size_t destBytesSize     = Buffer::Length(destBuffer);
-
-    if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
-        args.GetReturnValue().Set(Undefined(isolate));
-        return;
-    }
-
-    uint32 csize = bytesIn;
-    uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
-    
-    uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
-    if(uncompressedSize > ARRAY_COUNT(packetBuffer)) {
-        args.GetReturnValue().Set(Undefined(isolate));
-        return;
-    }
-
-    // strip varint heading
-    if(uncompressedSize == 0)
-    {
-        dataPointer++;
-        bytesIn--;
-    }
-    else
-    {
-        uint32 offset = static_cast<uint32>(bytesIn) - csize;
-        dataPointer += offset;
-        //std::cout << "Decompressing: " << uncompressedSize << " csize " << csize << "\n";
-        uint32 result = lzf_decompress(dataPointer, csize, packetBuffer, uncompressedSize);
-        if (!result) {
-            args.GetReturnValue().Set(Undefined(isolate));
-            return;
-        }
-        bytesIn = uncompressedSize;
-        dataPointer = &packetBuffer[0];
-    }
-
-    //std::cout << "bytesIn: " << bytesIn << " csize " << csize << "\n";
-
-    // saw off packet hash
-    uint32 expectedHash = *(uint32*)dataPointer;
-    dataPointer += 4; bytesIn -= 4;
-    
-    //std::cout << "expectedHash: " << std::hex << expectedHash << "\n";
-
-    // calc hash of packet data plus salt
-    uint32 crc = CalcCrc32(dataPointer, bytesIn, 0);
-    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
-    crc = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
-
-    //std::cout << "crc: " << std::hex << crc << "\n";
-
-    if(expectedHash != crc || destBytesSize < bytesIn) {
-        //std::cout << "hashFail!\n";
-        args.GetReturnValue().Set(Undefined(isolate));
-        return;
-    }
-
-    //std::cout << "return new buffer: " << bytesIn << "\n";
-
-    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
-    memcpy(destDataPointer, dataPointer, bytesIn);
-    
-    args.GetReturnValue().Set(Number::New(isolate, bytesIn));
-}
-
-void conditionPacket(const FunctionCallbackInfo<Value>& args) {
-    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
-        args.GetReturnValue().Set(ThrowNodeError("First 3 arguments must be a Buffers"));
-        return;
-    }
-    
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    Local<Object> saltBuffer = args[1]->ToObject();
-    Local<Object> destBuffer = args[2]->ToObject();
-
-    char* bytes = Buffer::Data(bufferIn);
-    uint32 len = Buffer::Length(bufferIn);
-    
-    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
-    size_t destBytesSize     = Buffer::Length(destBuffer);
-    
-    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
-    
-    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
-        // MTU explosions
-        args.GetReturnValue().Set(Undefined(isolate));
-        return;
-    }
-    
-    // !! lots of endian assumptions here.
-    uint8* outBytes = packetBuffer;
-    
-    // compression header 1 byte compression header = 0 = no compression
-    *outBytes = 0; outBytes++;
-
-    // hash header recall this position for hash
-    uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
-    
-    // connectionless header
-    *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
-    *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
-    *(uint16*)outBytes = len; outBytes += 2; // packet size
-
-    // append payload data
-    memcpy(outBytes, bytes, len);
-    outBytes += len;
-
-    ptrdiff_t totalBufferSize = (ptrdiff_t)outBytes - (ptrdiff_t)packetBuffer;
-
-    // calc hash
-    uint32 crc = CalcCrc32(packetBuffer + 5, totalBufferSize - 5, 0);
-    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
-    *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
-    
-    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
-
-    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
-    //HandleScope scope;
-    //return scope.Close(BufferOut->handle_);
-    args.GetReturnValue().Set(Number::New(isolate, totalBufferSize));
-}
-
-#else // Node v10
-
-Handle<Value> ThrowNodeError(const char* what = NULL) {
-    return ThrowException(Exception::Error(String::New(what)));
-}
-
-Handle<Value> compress(const Arguments& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    HandleScope scope;
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    unsigned bytesIn       = static_cast<unsigned>(Buffer::Length(bufferIn));
-    char * dataPointer     = Buffer::Data(bufferIn);
-    unsigned bytesCompressed = bytesIn + 100;
-    char * bufferOut        = (char*) malloc(bytesCompressed);
-
-    unsigned result = lzf_compress(dataPointer, static_cast<unsigned int>(bytesIn), bufferOut, bytesCompressed);
-
-    if (!result) {
-        free(bufferOut);
-        return Undefined();
-    }
-
-    Buffer *BufferOut = Buffer::New(bufferOut, result);
-    free(bufferOut);
-
-    return scope.Close(BufferOut->handle_);
-}
-
-Handle<Value> decompress(const Arguments &args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    Local<Object> bufferIn = args[0]->ToObject();
-
-    unsigned bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
-
-    if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
-        bytesUncompressed = args[1]->Uint32Value();
-    }
-
-
-    char * bufferOut = (char*) malloc(bytesUncompressed);
-    if (!bufferOut) {
-        return ThrowNodeError("LZF malloc failed!");
-    }
-
-    unsigned result = lzf_decompress(Buffer::Data(bufferIn), static_cast<unsigned>(Buffer::Length(bufferIn)), bufferOut, bytesUncompressed);
-
-    if (!result) {
-        return Undefined();
-    }
-
-    Buffer * BufferOut = Buffer::New(bufferOut, result);
-
-    free(bufferOut);
-
-    HandleScope scope;
-    return scope.Close(BufferOut->handle_);
-}
-
-Handle<Value> crc32(const Arguments& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    HandleScope scope;
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    size_t bytesIn         = Buffer::Length(bufferIn);
-    char * dataPointer     = Buffer::Data(bufferIn);
-
-    uint32 prior = 0;
-    if (args.Length() > 1 && args[1]->IsNumber()) {
-        prior = args[1]->Uint32Value();
-        unsigned char* f = (unsigned char*)&prior;
-        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
-    }
-
-    uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
-    unsigned char* f = (unsigned char*)&result;
-    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
-
-    return scope.Close(Number::New(result));
-}
-
-Handle<Value> whirlpool(const Arguments& args) {
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    Local<Object> bufferIn = args[0]->ToObject();
-
-    Whirlpool wp;
-    WhirlpoolHash wh;
-
-    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
-    wp.Get(wh);
-
-    Buffer* BufferOut = Buffer::New((const char*)&wh.bytes[0], 64);
-
-    HandleScope scope;
-    return scope.Close(BufferOut->handle_);
-}
-
-Handle<Value> verifyPacket(const Arguments &args) {
-    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
-        return ThrowNodeError("First 3 arguments must be Buffers");
-    }
-
-    //std::cout << "verifyPacket: " << "\n";
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    Local<Object> saltBuffer = args[1]->ToObject();
-    Local<Object> destBuffer = args[2]->ToObject();
-
-    size_t bytesIn              = Buffer::Length(bufferIn);
-    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
-    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
-    size_t destBytesSize     = Buffer::Length(destBuffer);
-
-    if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
-        return Undefined();
-    }
-
-    uint32 csize = static_cast<uint32>(bytesIn);
-    uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
-    
-    uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
-    if(uncompressedSize > ARRAY_COUNT(packetBuffer)) {
-        return Undefined();    
-    }
-
-    // strip varint heading
-    if(uncompressedSize == 0)
-    {
-        dataPointer++;
-        bytesIn--;
-    }
-    else
-    {
-        uint32 offset = static_cast<uint32>(bytesIn) - csize;
-        dataPointer += offset;
-        //std::cout << "Decompressing: " << uncompressedSize << " csize " << csize << "\n";
-        uint32 result = lzf_decompress(dataPointer, csize, packetBuffer, uncompressedSize);
-        if (!result) {
-            return Undefined();
-        }
-        bytesIn = uncompressedSize;
-        dataPointer = &packetBuffer[0];
-    }
-
-    //std::cout << "bytesIn: " << bytesIn << " csize " << csize << "\n";
-
-    // saw off packet hash
-    uint32 expectedHash = *(uint32*)dataPointer;
-    dataPointer += 4; bytesIn -= 4;
-    
-    //std::cout << "expectedHash: " << std::hex << expectedHash << "\n";
-
-    // calc hash of packet data plus salt
-    uint32 crc = CalcCrc32(dataPointer, bytesIn, 0);
-    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
-    crc = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
-
-    //std::cout << "crc: " << std::hex << crc << "\n";
-
-    if(expectedHash != crc || destBytesSize < bytesIn) {
-        //std::cout << "hashFail!\n";
-        return Undefined();
-    }
-
-    //std::cout << "return new buffer: " << bytesIn << "\n";
-
-    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
-    memcpy(destDataPointer, dataPointer, bytesIn);
-    
-    HandleScope scope;
-    return scope.Close(Number::New(static_cast<double>(bytesIn)));
-}
-
-Handle<Value> conditionPacket(const Arguments &args) {
-    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
-        return ThrowNodeError("First 3 arguments must be Buffers");
-    }
-    
-    Local<Object> bufferIn = args[0]->ToObject();
-    Local<Object> saltBuffer = args[1]->ToObject();
-    Local<Object> destBuffer = args[2]->ToObject();
-
-    char* bytes = Buffer::Data(bufferIn);
-    uint32 len = static_cast<uint32>(Buffer::Length(bufferIn));
-    
-    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
-    size_t destBytesSize     = Buffer::Length(destBuffer);
-    
-    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
-    
-    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
-        // MTU explosions
-        return Undefined();
-    }
-    
-    // !! lots of endian assumptions here.
-    uint8* outBytes = packetBuffer;
-    
-    // compression header 1 byte compression header = 0 = no compression
-    *outBytes = 0; outBytes++;
-
-    // hash header recall this position for hash
-    uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
-    
-    // connectionless header
-    *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
-    *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
-    *(uint16*)outBytes = len; outBytes += 2; // packet size
-
-    // append payload data
-    memcpy(outBytes, bytes, len);
-    outBytes += len;
-
-    ptrdiff_t totalBufferSize = (ptrdiff_t)outBytes - (ptrdiff_t)packetBuffer;
-
-    // calc hash
-    uint32 crc = CalcCrc32(packetBuffer + 5, totalBufferSize - 5, 0);
-    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
-    *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
-    
-    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
-
-    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
-    //HandleScope scope;
-    //return scope.Close(BufferOut->handle_);
-    HandleScope scope;
-    return scope.Close(Number::New(static_cast<double>(totalBufferSize)));
-}
-
-static Handle<Value> readAddressArg(in_addr& out, const Local<Value>& arg)
-{
-    if(!arg->IsString())
-    {
-        return ThrowNodeError("Expected string argument");
-    }
-
-    String::AsciiValue str(arg->ToString());
-
-    out.s_addr = inet_addr(*str);
-    
-    if(out.s_addr == INADDR_NONE)
-    {
-        return ThrowNodeError("Expected IP-address argument");
-    }
-
-    return Handle<Value>();
-}
-
-static Handle<Value> readPortArg(uint16_t& out, const Local<Value>& arg)
-{
-    if(!arg->IsInt32())
-    {
-        return ThrowNodeError("Expected int argument");
-    }
-
-    // TODO: check for > 16bit?
-    out = static_cast<uint16_t>(arg->Int32Value());
-    return Handle<Value>();
-}
-
-static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<Function>* callback = NULL)
-{
-    if(callback)
-    {
-        if(args.Length() != 8)
-        {
-            return ThrowNodeError("proxy requires 8 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, callback ]");
-        }
-
-    }
-    else
-    {
-        if(args.Length() != 7)
-        {
-            return ThrowNodeError("proxy requires 7 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort ]");
-        }
-    }
-
-    int i = 0;
-
-    Handle<Value> error;
-    
-    error = readAddressArg(out.aAddr, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.aPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readAddressArg(out.bAddr, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.bPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-
-    error = readAddressArg(out.nAddr, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.anPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.bnPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-
-    if(callback)
-    {
-        if(!args[i]->IsFunction())
-        {
-            return ThrowNodeError("Expected function argument");
-        }
-
-        *callback = Local<Function>::Cast(args[i++]);
-    }
-
-    return Handle<Value>();
 }
 
 #ifndef ENABLE_PROXY
@@ -1178,6 +595,23 @@ static uv_thread_t sProxyThread;
 static AsyncProxyQueue sProxyQueue;
 
 void emptyWork(uv_work_t*) { }
+
+#if NODE_MINOR_VERSION >= 12
+void dispachCallback(uv_work_t* req, int)
+{
+    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
+    Isolate* isolate = Isolate::GetCurrent();
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Boolean::New(isolate, ap->result) };
+
+    Local<Function> callback = Local<Function>::New(isolate, ap->callback);
+    callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
+    ap->callback.Reset();
+
+    delete ap; // NOTE: this trashes the work item; will lib UV hate us? judging from src looks okay
+}
+#else
 void dispachCallback(uv_work_t* req, int)
 {
     AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
@@ -1190,6 +624,8 @@ void dispachCallback(uv_work_t* req, int)
     ap->callback.Dispose();
     delete ap; // NOTE: this trashes the work item; will lib UV hate us? judging from src looks okay
 }
+
+#endif
 
 #ifdef COALESCE_PROXY_OPERATION
 
@@ -1405,7 +841,7 @@ static bool createProxy(const ProxySpec& proxy, const Local<Function>& callback)
     AsyncProxy* async = new AsyncProxy;
     async->spec = proxy;
     async->add = true;
-    async->callback = Persistent<Function>::New(callback);
+    async->callback.Reset(Isolate::GetCurrent(), callback); 
     clock_gettime(CLOCK_MONOTONIC, &async->submitted);
     sProxyQueue.push(async);
     return(true);
@@ -1426,6 +862,748 @@ static bool deleteProxy(const ProxySpec& proxy)
 }
 #endif // ENABLE_ASYNC_PROXY
 #endif // ENABLE_PROXY 
+
+#if NODE_MINOR_VERSION >= 12
+Handle<Value> ThrowNodeError(const char* what = NULL) {
+    return Isolate::GetCurrent()->ThrowException(Exception::Error(String::NewFromUtf8(Isolate::GetCurrent(), what)));
+}
+
+void compress(const FunctionCallbackInfo<Value>& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
+        return;
+    }
+
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    size_t bytesIn         = Buffer::Length(bufferIn);
+    char * dataPointer     = Buffer::Data(bufferIn);
+    size_t bytesCompressed = bytesIn + 100;
+    char * bufferOut        = (char*) malloc(bytesCompressed);
+
+    unsigned result = lzf_compress(dataPointer, bytesIn, bufferOut, bytesCompressed);
+
+    if (!result) {
+        free(bufferOut);
+        args.GetReturnValue().Set(Undefined(Isolate::GetCurrent()));
+        return;
+    }
+
+    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
+    free(bufferOut);
+
+    args.GetReturnValue().Set(resultBuffer);
+}
+
+void decompress(const FunctionCallbackInfo<Value>& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
+        return;
+    }
+
+    Isolate* isolate = Isolate::GetCurrent();
+
+    Local<Object> bufferIn = args[0]->ToObject();
+
+    size_t bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
+
+    if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
+        bytesUncompressed = args[1]->Uint32Value();
+    }
+
+
+    char * bufferOut = (char*) malloc(bytesUncompressed);
+    if (!bufferOut) {
+        args.GetReturnValue().Set(ThrowNodeError("LZF malloc failed!"));
+        return;
+    }
+
+    unsigned result = lzf_decompress(Buffer::Data(bufferIn), Buffer::Length(bufferIn), bufferOut, bytesUncompressed);
+
+    if (!result) {
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
+
+    free(bufferOut);
+
+    args.GetReturnValue().Set(resultBuffer);
+}
+
+void crc32(const FunctionCallbackInfo<Value>& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
+        return;
+    }
+
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    size_t bytesIn         = Buffer::Length(bufferIn);
+    char * dataPointer     = Buffer::Data(bufferIn);
+
+    uint32 prior = 0;
+    if (args.Length() > 1 && args[1]->IsNumber()) {
+        prior = args[1]->Uint32Value();
+        unsigned char* f = (unsigned char*)&prior;
+        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+    }
+
+    uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
+    unsigned char* f = (unsigned char*)&result;
+    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+
+    args.GetReturnValue().Set(Number::New(isolate, result));
+}
+
+void whirlpool(const FunctionCallbackInfo<Value>& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
+        return;
+    }
+
+    Isolate* isolate = Isolate::GetCurrent();
+    Local<Object> bufferIn = args[0]->ToObject();
+
+    Whirlpool wp;
+    WhirlpoolHash wh;
+
+    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
+    wp.Get(wh);
+
+    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, (const char*)&wh.bytes[0], 64);
+    args.GetReturnValue().Set(resultBuffer);
+}
+
+void verifyPacket(const FunctionCallbackInfo<Value>& args) {
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
+        return;
+    }
+
+    //std::cout << "verifyPacket: " << "\n";
+    Isolate* isolate = Isolate::GetCurrent();
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    Local<Object> saltBuffer = args[1]->ToObject();
+    Local<Object> destBuffer = args[2]->ToObject();
+
+    size_t bytesIn              = Buffer::Length(bufferIn);
+    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
+    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+
+    if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    uint32 csize = bytesIn;
+    uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
+    
+    uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
+    if(uncompressedSize > ARRAY_COUNT(packetBuffer)) {
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    // strip varint heading
+    if(uncompressedSize == 0)
+    {
+        dataPointer++;
+        bytesIn--;
+    }
+    else
+    {
+        uint32 offset = static_cast<uint32>(bytesIn) - csize;
+        dataPointer += offset;
+        //std::cout << "Decompressing: " << uncompressedSize << " csize " << csize << "\n";
+        uint32 result = lzf_decompress(dataPointer, csize, packetBuffer, uncompressedSize);
+        if (!result) {
+            args.GetReturnValue().Set(Undefined(isolate));
+            return;
+        }
+        bytesIn = uncompressedSize;
+        dataPointer = &packetBuffer[0];
+    }
+
+    //std::cout << "bytesIn: " << bytesIn << " csize " << csize << "\n";
+
+    // saw off packet hash
+    uint32 expectedHash = *(uint32*)dataPointer;
+    dataPointer += 4; bytesIn -= 4;
+    
+    //std::cout << "expectedHash: " << std::hex << expectedHash << "\n";
+
+    // calc hash of packet data plus salt
+    uint32 crc = CalcCrc32(dataPointer, bytesIn, 0);
+    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
+    crc = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
+
+    //std::cout << "crc: " << std::hex << crc << "\n";
+
+    if(expectedHash != crc || destBytesSize < bytesIn) {
+        //std::cout << "hashFail!\n";
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    //std::cout << "return new buffer: " << bytesIn << "\n";
+
+    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
+    memcpy(destDataPointer, dataPointer, bytesIn);
+    
+    args.GetReturnValue().Set(Number::New(isolate, bytesIn));
+}
+
+void conditionPacket(const FunctionCallbackInfo<Value>& args) {
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        args.GetReturnValue().Set(ThrowNodeError("First 3 arguments must be a Buffers"));
+        return;
+    }
+    
+    Isolate* isolate = Isolate::GetCurrent();
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    Local<Object> saltBuffer = args[1]->ToObject();
+    Local<Object> destBuffer = args[2]->ToObject();
+
+    char* bytes = Buffer::Data(bufferIn);
+    uint32 len = Buffer::Length(bufferIn);
+    
+    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+    
+    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
+    
+    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
+        // MTU explosions
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+    
+    // !! lots of endian assumptions here.
+    uint8* outBytes = packetBuffer;
+    
+    // compression header 1 byte compression header = 0 = no compression
+    *outBytes = 0; outBytes++;
+
+    // hash header recall this position for hash
+    uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
+    
+    // connectionless header
+    *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
+    *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
+    *(uint16*)outBytes = len; outBytes += 2; // packet size
+
+    // append payload data
+    memcpy(outBytes, bytes, len);
+    outBytes += len;
+
+    ptrdiff_t totalBufferSize = (ptrdiff_t)outBytes - (ptrdiff_t)packetBuffer;
+
+    // calc hash
+    uint32 crc = CalcCrc32(packetBuffer + 5, totalBufferSize - 5, 0);
+    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
+    *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
+    
+    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
+
+    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
+    //HandleScope scope;
+    //return scope.Close(BufferOut->handle_);
+    args.GetReturnValue().Set(Number::New(isolate, totalBufferSize));
+}
+
+static bool readAddressArg(in_addr& out, const Local<Value>& arg)
+{
+    if(!arg->IsString())
+    {
+        Isolate* isolate = Isolate::GetCurrent();
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+            "Expected IP-address argument")));
+        return(false);
+    }
+
+    String::Utf8Value str(arg->ToString());
+
+    out.s_addr = inet_addr(*str);
+    
+    if(out.s_addr == INADDR_NONE)
+    {
+        Isolate* isolate = Isolate::GetCurrent();
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+            "Expected IP-address argument")));
+        return(false);
+    }
+
+    return(true);
+}
+
+static bool readPortArg(uint16_t& out, const Local<Value>& arg)
+{
+    if(!arg->IsInt32())
+    {
+        Isolate* isolate = Isolate::GetCurrent();
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+            "Expected int argument")));
+        return(false);
+    }
+
+    // TODO: check for > 16bit?
+    out = static_cast<uint16_t>(arg->Int32Value());
+    return(true);
+}
+
+static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = NULL)
+{
+    if(callback)
+    {
+        if(args.Length() != 8)
+        {
+            Isolate* isolate = Isolate::GetCurrent();
+            isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+                "proxy requires 8 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, callback ]")));
+            return(false);
+        }
+
+    }
+    else
+    {
+        if(args.Length() != 7)
+        {
+            Isolate* isolate = Isolate::GetCurrent();
+            isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+                "proxy requires 7 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort ]")));
+            return(false);
+        }
+    }
+
+    int i = 0;
+
+    if(!readAddressArg(out.aAddr, args[i++])) { return(false); }
+    if(!readPortArg(out.aPort, args[i++])) { return(false); }
+    if(!readAddressArg(out.bAddr, args[i++])) { return(false); }
+    if(!readPortArg(out.bPort, args[i++])) { return(false); }
+    if(!readAddressArg(out.nAddr, args[i++])) { return(false); }
+    if(!readPortArg(out.anPort, args[i++])) { return(false); }
+    if(!readPortArg(out.bnPort, args[i++])) { return(false); }
+
+    if(callback)
+    {
+        if(!args[i]->IsFunction())
+        {
+            Isolate* isolate = Isolate::GetCurrent();
+            isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+                "Expected function argument")));
+            return(false);
+        }
+
+        *callback = Local<Function>::Cast(args[i++]);
+    }
+
+    return(true);
+}
+
+void flushProxies(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    if(args.Length() != 0)
+    {
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate, "flush proxies takes no argument")));
+        return;
+    }
+    
+    args.GetReturnValue().Set(Boolean::New(isolate, flushProxies()));
+}
+
+void createProxy(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    ProxySpec proxy;
+    Local<Function> callback;
+
+    if(!readProxyArgs(proxy, args, &callback))
+    {
+        return;
+    }
+
+#ifdef ENABLE_ASYNC_PROXY
+    createProxy(proxy, callback);
+#else
+    bool result = createProxy(proxy);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Boolean::New(isolate, result) };
+
+    callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
+#endif
+}
+
+void abortProxy(const FunctionCallbackInfo<Value>& args)
+{
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    ProxySpec proxy;
+
+    if(!readProxyArgs(proxy, args))
+    {
+        return;
+    }
+
+    args.GetReturnValue().Set(Boolean::New(isolate, abortProxy(proxy)));
+}
+
+void deleteProxy(const FunctionCallbackInfo<Value>& args)
+{
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    ProxySpec proxy;
+
+    if(!readProxyArgs(proxy, args))
+    {
+        return;
+    }
+
+    args.GetReturnValue().Set(Boolean::New(isolate, deleteProxy(proxy)));
+}
+
+#else // Node v10
+
+Handle<Value> ThrowNodeError(const char* what = NULL) {
+    return ThrowException(Exception::Error(String::New(what)));
+}
+
+Handle<Value> compress(const Arguments& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        return ThrowNodeError("First argument must be a Buffer");
+    }
+
+    HandleScope scope;
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    unsigned bytesIn       = static_cast<unsigned>(Buffer::Length(bufferIn));
+    char * dataPointer     = Buffer::Data(bufferIn);
+    unsigned bytesCompressed = bytesIn + 100;
+    char * bufferOut        = (char*) malloc(bytesCompressed);
+
+    unsigned result = lzf_compress(dataPointer, static_cast<unsigned int>(bytesIn), bufferOut, bytesCompressed);
+
+    if (!result) {
+        free(bufferOut);
+        return Undefined();
+    }
+
+    Buffer *BufferOut = Buffer::New(bufferOut, result);
+    free(bufferOut);
+
+    return scope.Close(BufferOut->handle_);
+}
+
+Handle<Value> decompress(const Arguments &args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        return ThrowNodeError("First argument must be a Buffer");
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject();
+
+    unsigned bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
+
+    if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
+        bytesUncompressed = args[1]->Uint32Value();
+    }
+
+
+    char * bufferOut = (char*) malloc(bytesUncompressed);
+    if (!bufferOut) {
+        return ThrowNodeError("LZF malloc failed!");
+    }
+
+    unsigned result = lzf_decompress(Buffer::Data(bufferIn), static_cast<unsigned>(Buffer::Length(bufferIn)), bufferOut, bytesUncompressed);
+
+    if (!result) {
+        return Undefined();
+    }
+
+    Buffer * BufferOut = Buffer::New(bufferOut, result);
+
+    free(bufferOut);
+
+    HandleScope scope;
+    return scope.Close(BufferOut->handle_);
+}
+
+Handle<Value> crc32(const Arguments& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        return ThrowNodeError("First argument must be a Buffer");
+    }
+
+    HandleScope scope;
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    size_t bytesIn         = Buffer::Length(bufferIn);
+    char * dataPointer     = Buffer::Data(bufferIn);
+
+    uint32 prior = 0;
+    if (args.Length() > 1 && args[1]->IsNumber()) {
+        prior = args[1]->Uint32Value();
+        unsigned char* f = (unsigned char*)&prior;
+        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+    }
+
+    uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
+    unsigned char* f = (unsigned char*)&result;
+    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+
+    return scope.Close(Number::New(result));
+}
+
+Handle<Value> whirlpool(const Arguments& args) {
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        return ThrowNodeError("First argument must be a Buffer");
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject();
+
+    Whirlpool wp;
+    WhirlpoolHash wh;
+
+    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
+    wp.Get(wh);
+
+    Buffer* BufferOut = Buffer::New((const char*)&wh.bytes[0], 64);
+
+    HandleScope scope;
+    return scope.Close(BufferOut->handle_);
+}
+
+Handle<Value> verifyPacket(const Arguments &args) {
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        return ThrowNodeError("First 3 arguments must be Buffers");
+    }
+
+    //std::cout << "verifyPacket: " << "\n";
+
+    Local<Object> bufferIn = args[0]->ToObject();
+    Local<Object> saltBuffer = args[1]->ToObject();
+    Local<Object> destBuffer = args[2]->ToObject();
+
+    size_t bytesIn              = Buffer::Length(bufferIn);
+    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
+    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+
+    if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
+        return Undefined();
+    }
+
+    uint32 csize = static_cast<uint32>(bytesIn);
+    uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
+    
+    uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
+    if(uncompressedSize > ARRAY_COUNT(packetBuffer)) {
+        return Undefined();    
+    }
+
+    // strip varint heading
+    if(uncompressedSize == 0)
+    {
+        dataPointer++;
+        bytesIn--;
+    }
+    else
+    {
+        uint32 offset = static_cast<uint32>(bytesIn) - csize;
+        dataPointer += offset;
+        //std::cout << "Decompressing: " << uncompressedSize << " csize " << csize << "\n";
+        uint32 result = lzf_decompress(dataPointer, csize, packetBuffer, uncompressedSize);
+        if (!result) {
+            return Undefined();
+        }
+        bytesIn = uncompressedSize;
+        dataPointer = &packetBuffer[0];
+    }
+
+    //std::cout << "bytesIn: " << bytesIn << " csize " << csize << "\n";
+
+    // saw off packet hash
+    uint32 expectedHash = *(uint32*)dataPointer;
+    dataPointer += 4; bytesIn -= 4;
+    
+    //std::cout << "expectedHash: " << std::hex << expectedHash << "\n";
+
+    // calc hash of packet data plus salt
+    uint32 crc = CalcCrc32(dataPointer, bytesIn, 0);
+    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
+    crc = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
+
+    //std::cout << "crc: " << std::hex << crc << "\n";
+
+    if(expectedHash != crc || destBytesSize < bytesIn) {
+        //std::cout << "hashFail!\n";
+        return Undefined();
+    }
+
+    //std::cout << "return new buffer: " << bytesIn << "\n";
+
+    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
+    memcpy(destDataPointer, dataPointer, bytesIn);
+    
+    HandleScope scope;
+    return scope.Close(Number::New(static_cast<double>(bytesIn)));
+}
+
+Handle<Value> conditionPacket(const Arguments &args) {
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        return ThrowNodeError("First 3 arguments must be Buffers");
+    }
+    
+    Local<Object> bufferIn = args[0]->ToObject();
+    Local<Object> saltBuffer = args[1]->ToObject();
+    Local<Object> destBuffer = args[2]->ToObject();
+
+    char* bytes = Buffer::Data(bufferIn);
+    uint32 len = static_cast<uint32>(Buffer::Length(bufferIn));
+    
+    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+    
+    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
+    
+    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
+        // MTU explosions
+        return Undefined();
+    }
+    
+    // !! lots of endian assumptions here.
+    uint8* outBytes = packetBuffer;
+    
+    // compression header 1 byte compression header = 0 = no compression
+    *outBytes = 0; outBytes++;
+
+    // hash header recall this position for hash
+    uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
+    
+    // connectionless header
+    *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
+    *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
+    *(uint16*)outBytes = len; outBytes += 2; // packet size
+
+    // append payload data
+    memcpy(outBytes, bytes, len);
+    outBytes += len;
+
+    ptrdiff_t totalBufferSize = (ptrdiff_t)outBytes - (ptrdiff_t)packetBuffer;
+
+    // calc hash
+    uint32 crc = CalcCrc32(packetBuffer + 5, totalBufferSize - 5, 0);
+    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
+    *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
+    
+    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
+
+    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
+    //HandleScope scope;
+    //return scope.Close(BufferOut->handle_);
+    HandleScope scope;
+    return scope.Close(Number::New(static_cast<double>(totalBufferSize)));
+}
+
+static Handle<Value> readAddressArg(in_addr& out, const Local<Value>& arg)
+{
+    if(!arg->IsString())
+    {
+        return ThrowNodeError("Expected string argument");
+    }
+
+    String::AsciiValue str(arg->ToString());
+
+    out.s_addr = inet_addr(*str);
+    
+    if(out.s_addr == INADDR_NONE)
+    {
+        return ThrowNodeError("Expected IP-address argument");
+    }
+
+    return Handle<Value>();
+}
+
+static Handle<Value> readPortArg(uint16_t& out, const Local<Value>& arg)
+{
+    if(!arg->IsInt32())
+    {
+        return ThrowNodeError("Expected int argument");
+    }
+
+    // TODO: check for > 16bit?
+    out = static_cast<uint16_t>(arg->Int32Value());
+    return Handle<Value>();
+}
+
+static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<Function>* callback = NULL)
+{
+    if(callback)
+    {
+        if(args.Length() != 8)
+        {
+            return ThrowNodeError("proxy requires 8 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, callback ]");
+        }
+
+    }
+    else
+    {
+        if(args.Length() != 7)
+        {
+            return ThrowNodeError("proxy requires 7 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort ]");
+        }
+    }
+
+    int i = 0;
+
+    Handle<Value> error;
+    
+    error = readAddressArg(out.aAddr, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.aPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readAddressArg(out.bAddr, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.bPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+
+    error = readAddressArg(out.nAddr, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.anPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+    
+    error = readPortArg(out.bnPort, args[i++]);
+    if(!error.IsEmpty()) { return(error); }
+
+    if(callback)
+    {
+        if(!args[i]->IsFunction())
+        {
+            return ThrowNodeError("Expected function argument");
+        }
+
+        *callback = Local<Function>::Cast(args[i++]);
+    }
+
+    return Handle<Value>();
+}
 
 Handle<Value> flushProxies(const Arguments& args) {
     if(args.Length() != 0) {
