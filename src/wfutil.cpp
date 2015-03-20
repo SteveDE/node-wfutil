@@ -482,11 +482,19 @@ static bool deleteProxy(const ProxySpec& proxy)
 struct AsyncProxy;
 struct AsyncProxy
 {
+    AsyncProxy() :
+        add(false),
+        result(false),
+        next(NULL)
+    {
+        async.data = NULL;
+    }
+
     ProxySpec spec;
     bool add; // or delete
     bool result;
     Persistent<Function> callback;
-    uv_work_t work;
+    uv_async_t async;
     timespec submitted;
     AsyncProxy* volatile next;
 };
@@ -594,39 +602,50 @@ private:
 static uv_thread_t sProxyThread;
 static AsyncProxyQueue sProxyQueue;
 
-void emptyWork(uv_work_t*) { }
+static void deleteAsyncProxy(uv_handle_t* req)
+{
+    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
+    delete ap;
+}
 
 #if NODE_MINOR_VERSION >= 12
-void dispachCallback(uv_work_t* req, int)
+static void dispatchCallback(uv_async_t* req, int)
 {
     Isolate* isolate = Isolate::GetCurrent();
     HandleScope scope(isolate);
 
-    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
+    if(!ap->callback.IsEmpty()) // Not sure if this catches dangling?
+    {
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = { Boolean::New(isolate, ap->result) };
 
-    const unsigned argc = 1;
-    Local<Value> argv[argc] = { Boolean::New(isolate, ap->result) };
+        Local<Function> callback = Local<Function>::New(isolate, ap->callback);
+        callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
+    }
 
-    Local<Function> callback = Local<Function>::New(isolate, ap->callback);
-    callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
     ap->callback.Reset();
 
-    delete ap; // NOTE: this trashes the work item; will lib UV hate us? judging from src looks okay
+    uv_close(reinterpret_cast<uv_handle_t*>(req), deleteAsyncProxy);
 }
 #else
-void dispachCallback(uv_work_t* req, int)
+static void dispatchCallback(uv_async_t* req, int)
 {
     HandleScope scope;
 
     AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
 
-    const unsigned argc = 1;
-    Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(ap->result)) };
+    if(!ap->callback.IsEmpty()) // Not sure if this catches dangling?
+    {
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(ap->result)) };
 
-    TryCatch try_catch;
-    ap->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+        TryCatch try_catch;
+        ap->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+    }
+
     ap->callback.Dispose();
-    delete ap; // NOTE: this trashes the work item; will lib UV hate us? judging from src looks okay
+
+    uv_close(reinterpret_cast<uv_handle_t*>(req), deleteAsyncProxy);
 }
 
 #endif
@@ -751,15 +770,14 @@ static void proxyLoop(void*)
         {
             AsyncProxy* next = it->next;
 
-            if(it->callback.IsEmpty())
+            if(!it->async.data)
             {
                 delete it;
             }
             else
             {
-                // This is ghetto but I'm not sure the best way to put the callbacks in the main thread?
-                it->work.data = it;
-                uv_queue_work(uv_default_loop(), &it->work, emptyWork, dispachCallback);
+                // Signal main thread that it can run the callback now
+                uv_async_send(&it->async);
             }
 
             it = next;
@@ -815,15 +833,14 @@ static void proxyLoop(void*)
             ap->result = flushProxyState(proxy);
         }
         
-        if(ap->callback.IsEmpty())
+        if(!ap->async.data)
         {
             delete ap;
         }
         else
         {
-            // This is ghetto but I'm not sure the best way to put the callbacks in the main thread?
-            ap->work.data = ap;
-            uv_queue_work(uv_default_loop(), &ap->work, emptyWork, dispachCallback);
+            // Signal main thread that it can run the callback now
+            uv_async_send(&ap->async);
         }
     }
 }
@@ -842,33 +859,45 @@ static void initAsyncProxy()
     uv_thread_create(&sProxyThread, proxyLoop, NULL);
 }
 
-static bool createProxy(const ProxySpec& proxy, const Local<Function>& callback)
+static bool pushAsyncProxy(const ProxySpec& proxy, const Local<Function>& callback, bool add)
 {
     AsyncProxy* async = new AsyncProxy;
     async->spec = proxy;
-    async->add = true;
-#if NODE_MINOR_VERSION >= 12
-    async->callback.Reset(Isolate::GetCurrent(), callback);
-#else
-    async->callback = Persistent<Function>::New(callback);
-#endif
+    async->add = add;
     clock_gettime(CLOCK_MONOTONIC, &async->submitted);
+
+    if(callback.IsEmpty())
+    {
+        async->async.data = NULL;
+    }
+    else
+    {
+        uv_async_init(uv_default_loop(), &async->async, dispatchCallback);
+        async->async.data = async;
+
+#if NODE_MINOR_VERSION >= 12
+        async->callback.Reset(Isolate::GetCurrent(), callback);
+#else
+        async->callback = Persistent<Function>::New(callback);
+#endif
+    }
     sProxyQueue.push(async);
     return(true);
+}
+
+static bool createProxy(const ProxySpec& proxy, const Local<Function>& callback)
+{
+    return(pushAsyncProxy(proxy, callback, true));
 }
 
 static bool abortProxy(const ProxySpec&)
 {
     return(false);
 }
-static bool deleteProxy(const ProxySpec& proxy)
+
+static bool deleteProxy(const ProxySpec& proxy, const Local<Function>& callback)
 {
-    AsyncProxy* async = new AsyncProxy;
-    async->spec = proxy;
-    async->add = false;
-    clock_gettime(CLOCK_MONOTONIC, &async->submitted);
-    sProxyQueue.push(async);
-    return(false);
+    return(pushAsyncProxy(proxy, callback, false));
 }
 #endif // ENABLE_ASYNC_PROXY
 #endif // ENABLE_PROXY 
@@ -1175,26 +1204,12 @@ static bool readPortArg(uint16_t& out, const Local<Value>& arg)
 
 static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = NULL)
 {
-    if(callback)
+    if((args.Length() < 7) || (args.Length() > 8))
     {
-        if(args.Length() != 8)
-        {
-            Isolate* isolate = Isolate::GetCurrent();
-            isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
-                "proxy requires 8 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, callback ]")));
-            return(false);
-        }
-
-    }
-    else
-    {
-        if(args.Length() != 7)
-        {
-            Isolate* isolate = Isolate::GetCurrent();
-            isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
-                "proxy requires 7 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort ]")));
-            return(false);
-        }
+        Isolate* isolate = Isolate::GetCurrent();
+        isolate->ThrowException(Exception::TypeError(String::NewFromUtf8(isolate,
+            "proxy requires 7 arguments: aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, [callback] ")));
+        return(false);
     }
 
     int i = 0;
@@ -1281,13 +1296,23 @@ void deleteProxy(const FunctionCallbackInfo<Value>& args)
     HandleScope scope(isolate);
 
     ProxySpec proxy;
+    Local<Function> callback;
 
-    if(!readProxyArgs(proxy, args))
+    if(!readProxyArgs(proxy, args, &callback))
     {
         return;
     }
 
-    args.GetReturnValue().Set(Boolean::New(isolate, deleteProxy(proxy)));
+#ifdef ENABLE_ASYNC_PROXY
+    deleteProxy(proxy, callback);
+#else
+    bool result = deleteProxy(proxy);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Boolean::New(isolate, result) };
+
+    callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
+#endif
 }
 
 #else // Node v10
@@ -1568,20 +1593,9 @@ static Handle<Value> readPortArg(uint16_t& out, const Local<Value>& arg)
 
 static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<Function>* callback = NULL)
 {
-    if(callback)
+    if((args.Length() < 7) || (args.Length() > 8))
     {
-        if(args.Length() != 8)
-        {
-            return ThrowNodeError("proxy requires 8 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, callback ]");
-        }
-
-    }
-    else
-    {
-        if(args.Length() != 7)
-        {
-            return ThrowNodeError("proxy requires 7 arguments: [ aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort ]");
-        }
+        return ThrowNodeError("proxy requires 7 arguments: aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, [callback] ");
     }
 
     int i = 0;
@@ -1668,11 +1682,23 @@ Handle<Value> deleteProxy(const Arguments& args)
 {
     HandleScope scope;
     ProxySpec proxy;
+    Local<Function> callback;
 
-    Handle<Value> error = readProxyArgs(proxy, args);
+    Handle<Value> error = readProxyArgs(proxy, args, &callback);
     if(!error.IsEmpty()) { return(error); }
 
-    return scope.Close(Boolean::New(deleteProxy(proxy)));
+#ifdef ENABLE_ASYNC_PROXY
+    deleteProxy(proxy, callback);
+#else
+    bool result = deleteProxy(proxy);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(result)) };
+
+    callback->Call(Context::GetCurrent()->Global(), argc, argv);
+#endif
+
+    return scope.Close(Undefined());
 }
 #endif // NODE_MINOR_VERSION < 12
 
