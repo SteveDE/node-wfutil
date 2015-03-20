@@ -1222,6 +1222,11 @@ static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& arg
     if(!readPortArg(out.anPort, args[i++])) { return(false); }
     if(!readPortArg(out.bnPort, args[i++])) { return(false); }
 
+    if(i >= args.Length())
+    {
+        return(true); 
+    }
+
     if(callback)
     {
         if(!args[i]->IsFunction())
@@ -1622,6 +1627,11 @@ static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<
     
     error = readPortArg(out.bnPort, args[i++]);
     if(!error.IsEmpty()) { return(error); }
+
+    if(i >= args.Length())
+    {
+        return Handle<Value>();
+    }
 
     if(callback)
     {
