@@ -599,8 +599,10 @@ void emptyWork(uv_work_t*) { }
 #if NODE_MINOR_VERSION >= 12
 void dispachCallback(uv_work_t* req, int)
 {
-    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
     Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
 
     const unsigned argc = 1;
     Local<Value> argv[argc] = { Boolean::New(isolate, ap->result) };
@@ -614,6 +616,8 @@ void dispachCallback(uv_work_t* req, int)
 #else
 void dispachCallback(uv_work_t* req, int)
 {
+    HandleScope scope;
+
     AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
 
     const unsigned argc = 1;
@@ -723,6 +727,7 @@ static void proxyLoop(void*)
                 }
             }
 
+#if 0
             if(n)
             {
                 timespec now;
@@ -732,6 +737,7 @@ static void proxyLoop(void*)
                 uint64_t throughput = (n * 1000000000ULL) / (nowNS - batchStartNS);
                 std::cout << "Commited " << n << " proxy ops in one batch (latency: " << latency << "ms, " << throughput << " p/s)\n";
             }
+#endif
 
             iptc_free(h);
         }
@@ -873,13 +879,13 @@ Handle<Value> ThrowNodeError(const char* what = NULL) {
 }
 
 void compress(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
         return;
     }
-
-    Isolate* isolate = Isolate::GetCurrent();
-    HandleScope scope(isolate);
 
     Local<Object> bufferIn = args[0]->ToObject();
     size_t bytesIn         = Buffer::Length(bufferIn);
@@ -902,12 +908,13 @@ void compress(const FunctionCallbackInfo<Value>& args) {
 }
 
 void decompress(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
         return;
     }
-
-    Isolate* isolate = Isolate::GetCurrent();
 
     Local<Object> bufferIn = args[0]->ToObject();
 
@@ -916,7 +923,6 @@ void decompress(const FunctionCallbackInfo<Value>& args) {
     if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
         bytesUncompressed = args[1]->Uint32Value();
     }
-
 
     char * bufferOut = (char*) malloc(bytesUncompressed);
     if (!bufferOut) {
@@ -939,13 +945,13 @@ void decompress(const FunctionCallbackInfo<Value>& args) {
 }
 
 void crc32(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
         return;
     }
-
-    Isolate* isolate = Isolate::GetCurrent();
-    HandleScope scope(isolate);
 
     Local<Object> bufferIn = args[0]->ToObject();
     size_t bytesIn         = Buffer::Length(bufferIn);
@@ -966,12 +972,14 @@ void crc32(const FunctionCallbackInfo<Value>& args) {
 }
 
 void whirlpool(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
         return;
     }
 
-    Isolate* isolate = Isolate::GetCurrent();
     Local<Object> bufferIn = args[0]->ToObject();
 
     Whirlpool wp;
@@ -985,13 +993,13 @@ void whirlpool(const FunctionCallbackInfo<Value>& args) {
 }
 
 void verifyPacket(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
     if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
         args.GetReturnValue().Set(ThrowNodeError("First argument must be a Buffer"));
         return;
     }
-
-    //std::cout << "verifyPacket: " << "\n";
-    Isolate* isolate = Isolate::GetCurrent();
 
     Local<Object> bufferIn = args[0]->ToObject();
     Local<Object> saltBuffer = args[1]->ToObject();
@@ -1066,13 +1074,14 @@ void verifyPacket(const FunctionCallbackInfo<Value>& args) {
 }
 
 void conditionPacket(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
     if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
         args.GetReturnValue().Set(ThrowNodeError("First 3 arguments must be a Buffers"));
         return;
     }
     
-    Isolate* isolate = Isolate::GetCurrent();
-
     Local<Object> bufferIn = args[0]->ToObject();
     Local<Object> saltBuffer = args[1]->ToObject();
     Local<Object> destBuffer = args[2]->ToObject();
@@ -1288,11 +1297,11 @@ Handle<Value> ThrowNodeError(const char* what = NULL) {
 }
 
 Handle<Value> compress(const Arguments& args) {
+    HandleScope scope;
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         return ThrowNodeError("First argument must be a Buffer");
     }
-
-    HandleScope scope;
 
     Local<Object> bufferIn = args[0]->ToObject();
     unsigned bytesIn       = static_cast<unsigned>(Buffer::Length(bufferIn));
@@ -1314,6 +1323,8 @@ Handle<Value> compress(const Arguments& args) {
 }
 
 Handle<Value> decompress(const Arguments &args) {
+    HandleScope scope;
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         return ThrowNodeError("First argument must be a Buffer");
     }
@@ -1342,16 +1353,15 @@ Handle<Value> decompress(const Arguments &args) {
 
     free(bufferOut);
 
-    HandleScope scope;
     return scope.Close(BufferOut->handle_);
 }
 
 Handle<Value> crc32(const Arguments& args) {
+    HandleScope scope;
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         return ThrowNodeError("First argument must be a Buffer");
     }
-
-    HandleScope scope;
 
     Local<Object> bufferIn = args[0]->ToObject();
     size_t bytesIn         = Buffer::Length(bufferIn);
@@ -1372,6 +1382,8 @@ Handle<Value> crc32(const Arguments& args) {
 }
 
 Handle<Value> whirlpool(const Arguments& args) {
+    HandleScope scope;
+
     if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
         return ThrowNodeError("First argument must be a Buffer");
     }
@@ -1386,11 +1398,12 @@ Handle<Value> whirlpool(const Arguments& args) {
 
     Buffer* BufferOut = Buffer::New((const char*)&wh.bytes[0], 64);
 
-    HandleScope scope;
     return scope.Close(BufferOut->handle_);
 }
 
 Handle<Value> verifyPacket(const Arguments &args) {
+    HandleScope scope;
+
     if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
         return ThrowNodeError("First 3 arguments must be Buffers");
     }
@@ -1462,11 +1475,12 @@ Handle<Value> verifyPacket(const Arguments &args) {
     //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
     memcpy(destDataPointer, dataPointer, bytesIn);
     
-    HandleScope scope;
     return scope.Close(Number::New(static_cast<double>(bytesIn)));
 }
 
 Handle<Value> conditionPacket(const Arguments &args) {
+    HandleScope scope;
+
     if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
         return ThrowNodeError("First 3 arguments must be Buffers");
     }
@@ -1518,7 +1532,6 @@ Handle<Value> conditionPacket(const Arguments &args) {
     //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
     //HandleScope scope;
     //return scope.Close(BufferOut->handle_);
-    HandleScope scope;
     return scope.Close(Number::New(static_cast<double>(totalBufferSize)));
 }
 
@@ -1610,15 +1623,16 @@ static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<
 }
 
 Handle<Value> flushProxies(const Arguments& args) {
+    HandleScope scope;
     if(args.Length() != 0) {
         return ThrowNodeError("flush proxies takes no argument");
     }
     
-    HandleScope scope;
     return scope.Close(Boolean::New(flushProxies()));
 }
 
 Handle<Value> createProxy(const Arguments& args) {
+    HandleScope scope;
     ProxySpec proxy;
     Local<Function> callback;
 
@@ -1636,29 +1650,28 @@ Handle<Value> createProxy(const Arguments& args) {
     callback->Call(Context::GetCurrent()->Global(), argc, argv);
 #endif
 
-    HandleScope scope;
     return scope.Close(Undefined());
 }
 
 Handle<Value> abortProxy(const Arguments& args)
 {
+    HandleScope scope;
     ProxySpec proxy;
 
     Handle<Value> error = readProxyArgs(proxy, args);
     if(!error.IsEmpty()) { return(error); }
 
-    HandleScope scope;
     return scope.Close(Boolean::New(abortProxy(proxy)));
 }
 
 Handle<Value> deleteProxy(const Arguments& args)
 {
+    HandleScope scope;
     ProxySpec proxy;
 
     Handle<Value> error = readProxyArgs(proxy, args);
     if(!error.IsEmpty()) { return(error); }
 
-    HandleScope scope;
     return scope.Close(Boolean::New(deleteProxy(proxy)));
 }
 #endif // NODE_MINOR_VERSION < 12
