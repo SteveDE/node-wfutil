@@ -609,10 +609,12 @@ static void deleteAsyncProxy(uv_handle_t* req)
 }
 
 #if NODE_MINOR_VERSION >= 12
-static void dispatchCallback(uv_async_t* req, int)
+static void dispatchCallback(uv_async_t* req)
 {
     Isolate* isolate = Isolate::GetCurrent();
     HandleScope scope(isolate);
+
+    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
 
     if(!ap->callback.IsEmpty()) // Not sure if this catches dangling?
     {
