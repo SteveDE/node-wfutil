@@ -96,6 +96,28 @@ std::ostream& operator<<(std::ostream& s, const ProxySpec& p)
     return(s);
 }
 
+#if defined(ENABLE_PROXY) && defined(ENABLE_ASYNC_PROXY)
+struct AsyncProxy;
+struct AsyncProxy
+{
+    AsyncProxy() :
+        add(false),
+        result(false),
+        next(NULL)
+    {
+        async.data = NULL;
+    }
+
+    ProxySpec spec;
+    bool add; // or delete
+    bool result;
+    Persistent<Function> callback;
+    uv_async_t async;
+    timespec submitted;
+    AsyncProxy* volatile next;
+};
+#endif // defined(ENABLE_PROXY) && defined(ENABLE_ASYNC_PROXY)
+
 #ifndef ENABLE_PROXY
 static bool flushProxies()
 {
@@ -255,6 +277,88 @@ static bool flushProxies()
     return(rc);
 }
 
+#ifdef COALESCE_PROXY_OPERATION
+static void failProxyList(AsyncProxy* first)
+{
+    for(AsyncProxy* it = first; it; it = it->next)
+    {
+        it->result = false;
+    }
+}
+
+static void flushProxyState(AsyncProxy* first)
+{
+    // TODO: hang onto these?
+    nf_conntrack* cta = nfct_new();
+    nf_conntrack* ctb = nfct_new();
+
+    if(!cta || !ctb)
+    {
+        std::cerr << "nfct_new: " << strerror(errno) << "\n";
+        // TODO: handle leaks
+        failProxyList(first);
+        return;
+    }
+
+    nfct_handle* h = nfct_open(CONNTRACK, 0);
+
+    if(!h)
+    {
+        std::cerr << "nfct_open: " << strerror(errno) << "\n";
+        failProxyList(first);
+    }
+    else
+    {
+        nfct_set_attr_u8(cta, ATTR_L3PROTO, AF_INET);
+        nfct_set_attr_u8(ctb, ATTR_L3PROTO, AF_INET);
+        nfct_set_attr_u8(cta, ATTR_L4PROTO, IPPROTO_UDP);
+        nfct_set_attr_u8(ctb, ATTR_L4PROTO, IPPROTO_UDP);
+
+        for(AsyncProxy* it = first; it; it = it->next)
+        {
+            if(!it->result)
+            {
+                continue; 
+            }
+
+            const ProxySpec& proxy = it->spec;
+            
+            nfct_set_attr_u32(cta, ATTR_IPV4_SRC, proxy.aAddr.s_addr);
+            nfct_set_attr_u32(cta, ATTR_IPV4_DST, proxy.nAddr.s_addr);
+            nfct_set_attr_u16(cta, ATTR_PORT_SRC, htons(proxy.aPort));
+            nfct_set_attr_u16(cta, ATTR_PORT_DST, htons(proxy.bnPort));
+
+            nfct_set_attr_u32(ctb, ATTR_IPV4_SRC, proxy.bAddr.s_addr);
+            nfct_set_attr_u32(ctb, ATTR_IPV4_DST, proxy.nAddr.s_addr);
+            
+            nfct_set_attr_u16(ctb, ATTR_PORT_SRC, htons(proxy.bPort));
+            nfct_set_attr_u16(ctb, ATTR_PORT_DST, htons(proxy.anPort));
+
+            if
+            (
+                // ENOENT is returned if no connections match
+                (nfct_query(h, NFCT_Q_DESTROY, cta) && (errno != ENOENT)) ||
+                (nfct_query(h, NFCT_Q_DESTROY, ctb) && (errno != ENOENT))
+            )
+            {
+                std::cerr << "nfct_query: " << strerror(errno) << "\n";
+                it->result = false;
+            }
+            else
+            {
+                it->result = true;
+            }
+        }
+
+        nfct_close(h);
+    }
+
+    nfct_destroy(ctb);
+    nfct_destroy(cta);
+}
+
+#else // !COALESCE_PROXY_OPERATION
+
 // NOTE: the original code was much more thorough:
 // conntrack -D -p udp -d $nAddr --dport $anPort > /dev/null 2>&1
 // conntrack -D -p udp -d $nAddr --dport $bnPort > /dev/null 2>&1
@@ -324,6 +428,7 @@ static bool flushProxyState(const ProxySpec& proxy)
 
     return(rc);
 }
+#endif // COALESCE_PROXY_OPERATION
 
 static bool addProxyRules(xtc_handle* h, const ProxySpec& proxy)
 {
@@ -478,26 +583,6 @@ static bool deleteProxy(const ProxySpec& proxy)
 #else // ENABLE_ASYNC_PROXY
 
 #define READWRITE_BARRIER() asm volatile("" ::: "memory")
-
-struct AsyncProxy;
-struct AsyncProxy
-{
-    AsyncProxy() :
-        add(false),
-        result(false),
-        next(NULL)
-    {
-        async.data = NULL;
-    }
-
-    ProxySpec spec;
-    bool add; // or delete
-    bool result;
-    Persistent<Function> callback;
-    uv_async_t async;
-    timespec submitted;
-    AsyncProxy* volatile next;
-};
 
 class AsyncProxyQueue
 {
@@ -763,10 +848,7 @@ static void proxyLoop(void*)
             iptc_free(h);
         }
 
-        for(AsyncProxy* it = first; it; it = it->next)
-        {
-            it->result = it->result && flushProxyState(it->spec);
-        }
+        flushProxyState(first);
 
         for(AsyncProxy* it = first; it;)
         {
