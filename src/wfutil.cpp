@@ -456,7 +456,7 @@ static bool addProxyRules(xtc_handle* h, const ProxySpec& proxy)
         return(false);
     }
 
-    setNatRule(sSnatEntry, proxy.bAddr, proxy.bPort, proxy.bAddr, proxy.aPort, proxy.nAddr, proxy.bnPort);
+    setNatRule(sSnatEntry, proxy.bAddr, proxy.bPort, proxy.aAddr, proxy.aPort, proxy.nAddr, proxy.bnPort);
     
     if(!iptc_append_entry("POSTROUTING", &sSnatEntry.entry, h))
     {
@@ -493,7 +493,7 @@ static bool deleteProxyRules(xtc_handle* h, const ProxySpec& proxy)
         return(false);
     }
 
-    setNatRule(sSnatEntry, proxy.bAddr, proxy.bPort, proxy.bAddr, proxy.aPort, proxy.nAddr, proxy.bnPort);
+    setNatRule(sSnatEntry, proxy.bAddr, proxy.bPort, proxy.aAddr, proxy.aPort, proxy.nAddr, proxy.bnPort);
     
     if(!iptc_delete_entry("POSTROUTING", &sSnatEntry.entry, sMatchMask, h))
     {
