@@ -693,7 +693,7 @@ static void deleteAsyncProxy(uv_handle_t* req)
     delete ap;
 }
 
-#if NODE_MINOR_VERSION >= 12
+#if !(NODE_MINOR_VERSION < 12 && NODE_MAJOR_VERSION == 0) // Node v0.12.*
 static void dispatchCallback(uv_async_t* req)
 {
     Isolate* isolate = Isolate::GetCurrent();
@@ -959,7 +959,7 @@ static bool pushAsyncProxy(const ProxySpec& proxy, const Local<Function>& callba
         uv_async_init(uv_default_loop(), &async->async, dispatchCallback);
         async->async.data = async;
 
-#if NODE_MINOR_VERSION >= 12
+#if !(NODE_MINOR_VERSION < 12 && NODE_MAJOR_VERSION == 0) // Node v0.12.*
         async->callback.Reset(Isolate::GetCurrent(), callback);
 #else
         async->callback = Persistent<Function>::New(callback);
@@ -986,7 +986,7 @@ static bool deleteProxy(const ProxySpec& proxy, const Local<Function>& callback)
 #endif // ENABLE_ASYNC_PROXY
 #endif // ENABLE_PROXY 
 
-#if NODE_MINOR_VERSION >= 12
+#if !(NODE_MINOR_VERSION < 12 && NODE_MAJOR_VERSION == 0) // Node v0.12.*
 Handle<Value> ThrowNodeError(const char* what = NULL) {
     return Isolate::GetCurrent()->ThrowException(Exception::Error(String::NewFromUtf8(Isolate::GetCurrent(), what)));
 }
@@ -1014,10 +1014,10 @@ void compress(const FunctionCallbackInfo<Value>& args) {
         return;
     }
 
-    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
+    v8::MaybeLocal<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
     free(bufferOut);
 
-    args.GetReturnValue().Set(resultBuffer);
+    args.GetReturnValue().Set(resultBuffer.ToLocalChecked());
 }
 
 void decompress(const FunctionCallbackInfo<Value>& args) {
@@ -1050,11 +1050,11 @@ void decompress(const FunctionCallbackInfo<Value>& args) {
         return;
     }
 
-    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
+    v8::MaybeLocal<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
 
     free(bufferOut);
 
-    args.GetReturnValue().Set(resultBuffer);
+    args.GetReturnValue().Set(resultBuffer.ToLocalChecked());
 }
 
 void crc32(const FunctionCallbackInfo<Value>& args) {
@@ -1101,8 +1101,8 @@ void whirlpool(const FunctionCallbackInfo<Value>& args) {
     wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
     wp.Get(wh);
 
-    v8::Local<v8::Object> resultBuffer = Buffer::New(isolate, (const char*)&wh.bytes[0], 64);
-    args.GetReturnValue().Set(resultBuffer);
+    v8::MaybeLocal<v8::Object> resultBuffer = Buffer::New(isolate, (char*)&wh.bytes[0], 64);
+    args.GetReturnValue().Set(resultBuffer.ToLocalChecked());
 }
 
 void verifyPacket(const FunctionCallbackInfo<Value>& args) {
@@ -1404,7 +1404,7 @@ void deleteProxy(const FunctionCallbackInfo<Value>& args)
 #endif
 }
 
-#else // Node v10
+#else // Node v0.12.*
 
 Handle<Value> ThrowNodeError(const char* what = NULL) {
     return ThrowException(Exception::Error(String::New(what)));

@@ -1,7 +1,7 @@
 {
   "name": "wfutil",
-  "version": "0.0.21",
-  "_id": "wfutil@0.0.21",
+  "version": "0.0.22",
+  "_id": "wfutil@0.0.22",
   "description": "lzf crc32 whirlpool utils for nodejs (node10/12)",
   "keywords": [
     "lzf",
