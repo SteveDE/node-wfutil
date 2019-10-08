@@ -39,11 +39,11 @@
 #define ENABLE_ASYNC_PROXY
 #define COALESCE_PROXY_OPERATION
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-fpermissive"
-#pragma GCC diagnostic ignored "-pedantic"
+//#pragma GCC diagnostic push
+//#pragma GCC diagnostic ignored "-fpermissive"
+//#pragma GCC diagnostic ignored "-pedantic"
 #include <libiptc/libiptc.h>
-#pragma GCC diagnostic pop
+//#pragma GCC diagnostic pop
 
 #include <errno.h>
 #include <time.h>
@@ -57,6 +57,8 @@
 #ifdef OLD_NETFILTER
 #include <linux/netfilter_ipv4/nf_nat.h>
 #else
+//Ubuntu 18 workaround: headers have multiple definition of enum ip_conntrack_status
+#define _NF_CONNTRACK_COMMON_H
 #include <linux/netfilter/nf_nat.h>
 #endif
 
