@@ -695,7 +695,30 @@ static void deleteAsyncProxy(uv_handle_t* req)
     delete ap;
 }
 
-#if !(NODE_MINOR_VERSION < 12 && NODE_MAJOR_VERSION == 0) // Node v0.12.*
+#if NODE_MAJOR_VERSION >= 12
+static void dispatchCallback(uv_async_t* req)
+{
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+
+    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
+
+    if(!ap->callback.IsEmpty()) // Not sure if this catches dangling?
+    {
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = { Boolean::New(isolate, ap->result) };
+
+        Local<Context> context = isolate->GetCurrentContext();
+        Local<Function> callback = Local<Function>::New(isolate, ap->callback);
+        MaybeLocal<Value> cr = callback->Call(context, Null(isolate), argc, argv);
+        (void)cr; // Ignoring return value of Call
+    }
+
+    ap->callback.Reset();
+
+    uv_close(reinterpret_cast<uv_handle_t*>(req), deleteAsyncProxy);
+}
+#else // Node 10 & 8
 static void dispatchCallback(uv_async_t* req)
 {
     Isolate* isolate = Isolate::GetCurrent();
@@ -716,27 +739,6 @@ static void dispatchCallback(uv_async_t* req)
 
     uv_close(reinterpret_cast<uv_handle_t*>(req), deleteAsyncProxy);
 }
-#else
-static void dispatchCallback(uv_async_t* req, int)
-{
-    HandleScope scope;
-
-    AsyncProxy* ap = reinterpret_cast<AsyncProxy*>(req->data);
-
-    if(!ap->callback.IsEmpty()) // Not sure if this catches dangling?
-    {
-        const unsigned argc = 1;
-        Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(ap->result)) };
-
-        TryCatch try_catch;
-        ap->callback->Call(Context::GetCurrent()->Global(), argc, argv);
-    }
-
-    ap->callback.Dispose();
-
-    uv_close(reinterpret_cast<uv_handle_t*>(req), deleteAsyncProxy);
-}
-
 #endif
 
 #ifdef COALESCE_PROXY_OPERATION
@@ -961,10 +963,10 @@ static bool pushAsyncProxy(const ProxySpec& proxy, const Local<Function>& callba
         uv_async_init(uv_default_loop(), &async->async, dispatchCallback);
         async->async.data = async;
 
-#if !(NODE_MINOR_VERSION < 12 && NODE_MAJOR_VERSION == 0) // Node v0.12.*
+#if NODE_MAJOR_VERSION >= 12
         async->callback.Reset(Isolate::GetCurrent(), callback);
-#else
-        async->callback = Persistent<Function>::New(callback);
+#else // Node 10 & 8
+        async->callback.Reset(Isolate::GetCurrent(), callback);
 #endif
     }
     sProxyQueue.push(async);
@@ -988,7 +990,430 @@ static bool deleteProxy(const ProxySpec& proxy, const Local<Function>& callback)
 #endif // ENABLE_ASYNC_PROXY
 #endif // ENABLE_PROXY 
 
-#if !(NODE_MINOR_VERSION < 12 && NODE_MAJOR_VERSION == 0) // Node v0.12.*
+#if NODE_MAJOR_VERSION >= 12
+void ThrowNodeError(Isolate* isolate, const char* what = NULL) {
+    isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, what, NewStringType::kNormal).ToLocalChecked()));
+}
+
+void compress(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        ThrowNodeError(isolate, "First argument must be a Buffer");
+        return;
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject(context).ToLocalChecked();
+    size_t bytesIn         = Buffer::Length(bufferIn);
+    char * dataPointer     = Buffer::Data(bufferIn);
+    size_t bytesCompressed = bytesIn + 100;
+    char * bufferOut        = (char*) malloc(bytesCompressed);
+
+    unsigned result = lzf_compress(dataPointer, bytesIn, bufferOut, bytesCompressed);
+
+    if (!result) {
+        free(bufferOut);
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    v8::MaybeLocal<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
+    free(bufferOut);
+
+    args.GetReturnValue().Set(resultBuffer.ToLocalChecked());
+}
+
+void decompress(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        ThrowNodeError(isolate, "First argument must be a Buffer");
+        return;
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject(context).ToLocalChecked();
+
+    size_t bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
+
+    if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
+        bytesUncompressed = args[1].As<Uint32>()->Value();
+    }
+
+    char * bufferOut = (char*) malloc(bytesUncompressed);
+    if (!bufferOut) {
+        ThrowNodeError(isolate, "LZF malloc failed!");
+        return;
+    }
+
+    unsigned result = lzf_decompress(Buffer::Data(bufferIn), Buffer::Length(bufferIn), bufferOut, bytesUncompressed);
+
+    if (!result) {
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    v8::MaybeLocal<v8::Object> resultBuffer = Buffer::New(isolate, bufferOut, result);
+
+    free(bufferOut);
+
+    args.GetReturnValue().Set(resultBuffer.ToLocalChecked());
+}
+
+void crc32(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        ThrowNodeError(isolate, "First argument must be a Buffer");
+        return;
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject(context).ToLocalChecked();
+    size_t bytesIn         = Buffer::Length(bufferIn);
+    char * dataPointer     = Buffer::Data(bufferIn);
+
+    uint32 prior = 0;
+    if (args.Length() > 1 && args[1]->IsNumber()) {
+        prior = args[1].As<Uint32>()->Value();
+        unsigned char* f = (unsigned char*)&prior;
+        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+    }
+
+    uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
+    unsigned char* f = (unsigned char*)&result;
+    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
+
+    args.GetReturnValue().Set(Number::New(isolate, result));
+}
+
+void whirlpool(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
+        ThrowNodeError(isolate, "First argument must be a Buffer");
+        return;
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject(context).ToLocalChecked();
+
+    Whirlpool wp;
+    WhirlpoolHash wh;
+
+    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
+    wp.Get(wh);
+
+    v8::MaybeLocal<v8::Object> resultBuffer = Buffer::New(isolate, (char*)&wh.bytes[0], 64);
+    args.GetReturnValue().Set(resultBuffer.ToLocalChecked());
+}
+
+void verifyPacket(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        ThrowNodeError(isolate, "First argument must be a Buffer");
+        return;
+    }
+
+    Local<Object> bufferIn = args[0]->ToObject(context).ToLocalChecked();
+    Local<Object> saltBuffer = args[1]->ToObject(context).ToLocalChecked();
+    Local<Object> destBuffer = args[2]->ToObject(context).ToLocalChecked();
+
+    size_t bytesIn              = Buffer::Length(bufferIn);
+    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
+    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+
+    if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    uint32 csize = bytesIn;
+    uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
+    
+    uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
+    if(uncompressedSize > ARRAY_COUNT(packetBuffer)) {
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    // strip varint heading
+    if(uncompressedSize == 0)
+    {
+        dataPointer++;
+        bytesIn--;
+    }
+    else
+    {
+        uint32 offset = static_cast<uint32>(bytesIn) - csize;
+        dataPointer += offset;
+        //std::cout << "Decompressing: " << uncompressedSize << " csize " << csize << "\n";
+        uint32 result = lzf_decompress(dataPointer, csize, packetBuffer, uncompressedSize);
+        if (!result) {
+            args.GetReturnValue().Set(Undefined(isolate));
+            return;
+        }
+        bytesIn = uncompressedSize;
+        dataPointer = &packetBuffer[0];
+    }
+
+    //std::cout << "bytesIn: " << bytesIn << " csize " << csize << "\n";
+
+    // saw off packet hash
+    uint32 expectedHash = *(uint32*)dataPointer;
+    dataPointer += 4; bytesIn -= 4;
+    
+    //std::cout << "expectedHash: " << std::hex << expectedHash << "\n";
+
+    // calc hash of packet data plus salt
+    uint32 crc = CalcCrc32(dataPointer, bytesIn, 0);
+    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
+    crc = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
+
+    //std::cout << "crc: " << std::hex << crc << "\n";
+
+    if(expectedHash != crc || destBytesSize < bytesIn) {
+        //std::cout << "hashFail!\n";
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+
+    //std::cout << "return new buffer: " << bytesIn << "\n";
+
+    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
+    memcpy(destDataPointer, dataPointer, bytesIn);
+    
+    args.GetReturnValue().Set(Number::New(isolate, bytesIn));
+}
+
+void conditionPacket(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
+        ThrowNodeError(isolate, "First 3 arguments must be a Buffers");
+        return;
+    }
+    
+    Local<Object> bufferIn = args[0]->ToObject(context).ToLocalChecked();
+    Local<Object> saltBuffer = args[1]->ToObject(context).ToLocalChecked();
+    Local<Object> destBuffer = args[2]->ToObject(context).ToLocalChecked();
+
+    char* bytes = Buffer::Data(bufferIn);
+    uint32 len = Buffer::Length(bufferIn);
+    
+    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
+    size_t destBytesSize     = Buffer::Length(destBuffer);
+    
+    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
+    
+    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
+        // MTU explosions
+        args.GetReturnValue().Set(Undefined(isolate));
+        return;
+    }
+    
+    // !! lots of endian assumptions here.
+    uint8* outBytes = packetBuffer;
+    
+    // compression header 1 byte compression header = 0 = no compression
+    *outBytes = 0; outBytes++;
+
+    // hash header recall this position for hash
+    uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
+    
+    // connectionless header
+    *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
+    *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
+    *(uint16*)outBytes = len; outBytes += 2; // packet size
+
+    // append payload data
+    memcpy(outBytes, bytes, len);
+    outBytes += len;
+
+    ptrdiff_t totalBufferSize = (ptrdiff_t)outBytes - (ptrdiff_t)packetBuffer;
+
+    // calc hash
+    uint32 crc = CalcCrc32(packetBuffer + 5, totalBufferSize - 5, 0);
+    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
+    *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
+    
+    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
+
+    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
+    //HandleScope scope;
+    //return scope.Close(BufferOut->handle_);
+    args.GetReturnValue().Set(Number::New(isolate, totalBufferSize));
+}
+
+static bool readAddressArg(in_addr& out, const FunctionCallbackInfo<Value>& args, int argIndex)
+{
+    const Local<Value>& arg = args[argIndex];
+    Isolate* isolate = args.GetIsolate();
+    Local<Context> context = isolate->GetCurrentContext();
+
+    if(!arg->IsString())
+    {
+        ThrowNodeError(isolate, "Expected IP-address argument");
+        return(false);
+    }
+
+    String::Utf8Value str(isolate, arg->ToString(context).ToLocalChecked());
+
+    out.s_addr = inet_addr(*str);
+    
+    if(out.s_addr == INADDR_NONE)
+    {
+        Isolate* isolate = args.GetIsolate();
+        ThrowNodeError(isolate, "Expected IP-address argument");
+        return(false);
+    }
+
+    return(true);
+}
+
+static bool readPortArg(uint16_t& out, const FunctionCallbackInfo<Value>& args, int argIndex)
+{
+    const Local<Value>& arg = args[argIndex];
+
+    if(!arg->IsInt32())
+    {
+        Isolate* isolate = args.GetIsolate();
+        ThrowNodeError(isolate, "Expected int argument");
+        return(false);
+    }
+
+    // TODO: check for > 16bit?
+    out = static_cast<uint16_t>(arg.As<Int32>()->Value());
+    return(true);
+}
+
+static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = NULL)
+{
+    if((args.Length() < 7) || (args.Length() > 8))
+    {
+        Isolate* isolate = args.GetIsolate();
+        ThrowNodeError(isolate, "proxy requires 7 arguments: aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, [callback]");
+        return(false);
+    }
+
+    int i = 0;
+
+    if(!readAddressArg(out.aAddr, args, i++)) { return(false); }
+    if(!readPortArg(out.aPort, args, i++)) { return(false); }
+    if(!readAddressArg(out.bAddr, args, i++)) { return(false); }
+    if(!readPortArg(out.bPort, args, i++)) { return(false); }
+    if(!readAddressArg(out.nAddr, args, i++)) { return(false); }
+    if(!readPortArg(out.anPort, args, i++)) { return(false); }
+    if(!readPortArg(out.bnPort, args, i++)) { return(false); }
+
+    if(i >= args.Length())
+    {
+        return(true); 
+    }
+
+    if(callback)
+    {
+        if(!args[i]->IsFunction())
+        {
+            Isolate* isolate = args.GetIsolate();
+            ThrowNodeError(isolate, "Expected function argument");
+            return(false);
+        }
+
+        *callback = Local<Function>::Cast(args[i++]);
+    }
+
+    return(true);
+}
+
+void flushProxies(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+
+    if(args.Length() != 0)
+    {
+        ThrowNodeError(isolate, "flush proxies takes no argument");
+        return;
+    }
+    
+    args.GetReturnValue().Set(Boolean::New(isolate, flushProxies()));
+}
+
+void createProxy(const FunctionCallbackInfo<Value>& args) {
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+
+    ProxySpec proxy;
+    Local<Function> callback;
+
+    if(!readProxyArgs(proxy, args, &callback))
+    {
+        return;
+    }
+
+#ifdef ENABLE_ASYNC_PROXY
+    createProxy(proxy, callback);
+#else
+    bool result = createProxy(proxy);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Boolean::New(isolate, result) };
+
+    callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
+#endif
+}
+
+void abortProxy(const FunctionCallbackInfo<Value>& args)
+{
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+
+    ProxySpec proxy;
+
+    if(!readProxyArgs(proxy, args))
+    {
+        return;
+    }
+
+    args.GetReturnValue().Set(Boolean::New(isolate, abortProxy(proxy)));
+}
+
+void deleteProxy(const FunctionCallbackInfo<Value>& args)
+{
+    Isolate* isolate = args.GetIsolate();
+    HandleScope scope(isolate);
+
+    ProxySpec proxy;
+    Local<Function> callback;
+
+    if(!readProxyArgs(proxy, args, &callback))
+    {
+        return;
+    }
+
+#ifdef ENABLE_ASYNC_PROXY
+    deleteProxy(proxy, callback);
+#else
+    bool result = deleteProxy(proxy);
+
+    const unsigned argc = 1;
+    Local<Value> argv[argc] = { Boolean::New(isolate, result) };
+
+    callback->Call(isolate->GetCurrentContext()->Global(), argc, argv);
+#endif
+}
+#else // Node 10 & 8
 Handle<Value> ThrowNodeError(const char* what = NULL) {
     return Isolate::GetCurrent()->ThrowException(Exception::Error(String::NewFromUtf8(Isolate::GetCurrent(), what)));
 }
@@ -1248,7 +1673,8 @@ void conditionPacket(const FunctionCallbackInfo<Value>& args) {
     args.GetReturnValue().Set(Number::New(isolate, totalBufferSize));
 }
 
-static bool readAddressArg(in_addr& out, const Local<Value>& arg)
+static bool readAddressArg(in_addr& out, 
+const Local<Value>& arg)
 {
     if(!arg->IsString())
     {
@@ -1300,13 +1726,13 @@ static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& arg
 
     int i = 0;
 
-    if(!readAddressArg(out.aAddr, args[i++])) { return(false); }
-    if(!readPortArg(out.aPort, args[i++])) { return(false); }
-    if(!readAddressArg(out.bAddr, args[i++])) { return(false); }
-    if(!readPortArg(out.bPort, args[i++])) { return(false); }
-    if(!readAddressArg(out.nAddr, args[i++])) { return(false); }
-    if(!readPortArg(out.anPort, args[i++])) { return(false); }
-    if(!readPortArg(out.bnPort, args[i++])) { return(false); }
+    if(!readAddressArg(out.aAddr, args, i++)) { return(false); }
+    if(!readPortArg(out.aPort, args, i++)) { return(false); }
+    if(!readAddressArg(out.bAddr, args, i++)) { return(false); }
+    if(!readPortArg(out.bPort, args, i++)) { return(false); }
+    if(!readAddressArg(out.nAddr, args, i++)) { return(false); }
+    if(!readPortArg(out.anPort, args, i++)) { return(false); }
+    if(!readPortArg(out.bnPort, args, i++)) { return(false); }
 
     if(i >= args.Length())
     {
@@ -1406,397 +1832,7 @@ void deleteProxy(const FunctionCallbackInfo<Value>& args)
 #endif
 }
 
-#else // Node v0.12.*
-
-Handle<Value> ThrowNodeError(const char* what = NULL) {
-    return ThrowException(Exception::Error(String::New(what)));
-}
-
-Handle<Value> compress(const Arguments& args) {
-    HandleScope scope;
-
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    unsigned bytesIn       = static_cast<unsigned>(Buffer::Length(bufferIn));
-    char * dataPointer     = Buffer::Data(bufferIn);
-    unsigned bytesCompressed = bytesIn + 100;
-    char * bufferOut        = (char*) malloc(bytesCompressed);
-
-    unsigned result = lzf_compress(dataPointer, static_cast<unsigned int>(bytesIn), bufferOut, bytesCompressed);
-
-    if (!result) {
-        free(bufferOut);
-        return Undefined();
-    }
-
-    Buffer *BufferOut = Buffer::New(bufferOut, result);
-    free(bufferOut);
-
-    return scope.Close(BufferOut->handle_);
-}
-
-Handle<Value> decompress(const Arguments &args) {
-    HandleScope scope;
-
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    Local<Object> bufferIn = args[0]->ToObject();
-
-    unsigned bytesUncompressed = 999 * 1024 * 1024; // it's about max size that V8 supports
-
-    if (args.Length() > 1 && args[1]->IsNumber()) { // accept dest buffer size
-        bytesUncompressed = args[1]->Uint32Value();
-    }
-
-
-    char * bufferOut = (char*) malloc(bytesUncompressed);
-    if (!bufferOut) {
-        return ThrowNodeError("LZF malloc failed!");
-    }
-
-    unsigned result = lzf_decompress(Buffer::Data(bufferIn), static_cast<unsigned>(Buffer::Length(bufferIn)), bufferOut, bytesUncompressed);
-
-    if (!result) {
-        return Undefined();
-    }
-
-    Buffer * BufferOut = Buffer::New(bufferOut, result);
-
-    free(bufferOut);
-
-    return scope.Close(BufferOut->handle_);
-}
-
-Handle<Value> crc32(const Arguments& args) {
-    HandleScope scope;
-
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    size_t bytesIn         = Buffer::Length(bufferIn);
-    char * dataPointer     = Buffer::Data(bufferIn);
-
-    uint32 prior = 0;
-    if (args.Length() > 1 && args[1]->IsNumber()) {
-        prior = args[1]->Uint32Value();
-        unsigned char* f = (unsigned char*)&prior;
-        prior = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
-    }
-
-    uint32 result = CalcCrc32(dataPointer, bytesIn, prior);
-    unsigned char* f = (unsigned char*)&result;
-    result = f[3] | (f[2] << 8) | (f[1] << 16) | (f[0] << 24);
-
-    return scope.Close(Number::New(result));
-}
-
-Handle<Value> whirlpool(const Arguments& args) {
-    HandleScope scope;
-
-    if (args.Length() < 1 || !Buffer::HasInstance(args[0])) {
-        return ThrowNodeError("First argument must be a Buffer");
-    }
-
-    Local<Object> bufferIn = args[0]->ToObject();
-
-    Whirlpool wp;
-    WhirlpoolHash wh;
-
-    wp.Hash(Buffer::Data(bufferIn), Buffer::Length(bufferIn));
-    wp.Get(wh);
-
-    Buffer* BufferOut = Buffer::New((const char*)&wh.bytes[0], 64);
-
-    return scope.Close(BufferOut->handle_);
-}
-
-Handle<Value> verifyPacket(const Arguments &args) {
-    HandleScope scope;
-
-    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
-        return ThrowNodeError("First 3 arguments must be Buffers");
-    }
-
-    //std::cout << "verifyPacket: " << "\n";
-
-    Local<Object> bufferIn = args[0]->ToObject();
-    Local<Object> saltBuffer = args[1]->ToObject();
-    Local<Object> destBuffer = args[2]->ToObject();
-
-    size_t bytesIn              = Buffer::Length(bufferIn);
-    uint8* dataPointer        = (uint8*)Buffer::Data(bufferIn);
-    uint8* destDataPointer  = (uint8*)Buffer::Data(destBuffer);
-    size_t destBytesSize     = Buffer::Length(destBuffer);
-
-    if(bytesIn < 5) { // illegal size need at least varint byte & packet hash
-        return Undefined();
-    }
-
-    uint32 csize = static_cast<uint32>(bytesIn);
-    uint32 uncompressedSize = GetVarIntLZF(dataPointer, csize);
-    
-    uint8 packetBuffer[16384] = { 0 }; // static packet decomp buffer.
-    if(uncompressedSize > ARRAY_COUNT(packetBuffer)) {
-        return Undefined();    
-    }
-
-    // strip varint heading
-    if(uncompressedSize == 0)
-    {
-        dataPointer++;
-        bytesIn--;
-    }
-    else
-    {
-        uint32 offset = static_cast<uint32>(bytesIn) - csize;
-        dataPointer += offset;
-        //std::cout << "Decompressing: " << uncompressedSize << " csize " << csize << "\n";
-        uint32 result = lzf_decompress(dataPointer, csize, packetBuffer, uncompressedSize);
-        if (!result) {
-            return Undefined();
-        }
-        bytesIn = uncompressedSize;
-        dataPointer = &packetBuffer[0];
-    }
-
-    //std::cout << "bytesIn: " << bytesIn << " csize " << csize << "\n";
-
-    // saw off packet hash
-    uint32 expectedHash = *(uint32*)dataPointer;
-    dataPointer += 4; bytesIn -= 4;
-    
-    //std::cout << "expectedHash: " << std::hex << expectedHash << "\n";
-
-    // calc hash of packet data plus salt
-    uint32 crc = CalcCrc32(dataPointer, bytesIn, 0);
-    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
-    crc = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
-
-    //std::cout << "crc: " << std::hex << crc << "\n";
-
-    if(expectedHash != crc || destBytesSize < bytesIn) {
-        //std::cout << "hashFail!\n";
-        return Undefined();
-    }
-
-    //std::cout << "return new buffer: " << bytesIn << "\n";
-
-    //Buffer* BufferOut = Buffer::New((char*)dataPointer, bytesIn);
-    memcpy(destDataPointer, dataPointer, bytesIn);
-    
-    return scope.Close(Number::New(static_cast<double>(bytesIn)));
-}
-
-Handle<Value> conditionPacket(const Arguments &args) {
-    HandleScope scope;
-
-    if (args.Length() < 3 || !Buffer::HasInstance(args[0]) || !Buffer::HasInstance(args[1]) || !Buffer::HasInstance(args[2])) {
-        return ThrowNodeError("First 3 arguments must be Buffers");
-    }
-    
-    Local<Object> bufferIn = args[0]->ToObject();
-    Local<Object> saltBuffer = args[1]->ToObject();
-    Local<Object> destBuffer = args[2]->ToObject();
-
-    char* bytes = Buffer::Data(bufferIn);
-    uint32 len = static_cast<uint32>(Buffer::Length(bufferIn));
-    
-    uint8* packetBuffer  = (uint8*)Buffer::Data(destBuffer);
-    size_t destBytesSize     = Buffer::Length(destBuffer);
-    
-    const size_t HEADER_SIZE = 1 + 4 + 2 + 2 + 2;
-    
-    if (len > 1400 || (len + HEADER_SIZE) > destBytesSize) {
-        // MTU explosions
-        return Undefined();
-    }
-    
-    // !! lots of endian assumptions here.
-    uint8* outBytes = packetBuffer;
-    
-    // compression header 1 byte compression header = 0 = no compression
-    *outBytes = 0; outBytes++;
-
-    // hash header recall this position for hash
-    uint32* crcPtr = (uint32*)outBytes; outBytes += 4; 
-    
-    // connectionless header
-    *(uint16*)outBytes = 0; outBytes += 2; // 16 bit packet num
-    *(uint16*)outBytes = (2 << 14); outBytes += 2; // 16 but chunk header
-    *(uint16*)outBytes = len; outBytes += 2; // packet size
-
-    // append payload data
-    memcpy(outBytes, bytes, len);
-    outBytes += len;
-
-    ptrdiff_t totalBufferSize = (ptrdiff_t)outBytes - (ptrdiff_t)packetBuffer;
-
-    // calc hash
-    uint32 crc = CalcCrc32(packetBuffer + 5, totalBufferSize - 5, 0);
-    crc =  CalcCrc32(Buffer::Data(saltBuffer), Buffer::Length(saltBuffer), crc); // add in salt.
-    *crcPtr = (crc & 0x000000FFU) << 24 | (crc & 0x0000FF00U) << 8 | (crc & 0x00FF0000U) >> 8 | (crc & 0xFF000000U) >> 24;
-    
-    //std::cout << "crc: " << std::hex << *crcPtr << " " << totalBufferSize << "\n";
-
-    //Buffer* BufferOut = Buffer::New(packetBuffer, totalBufferSize);
-    //HandleScope scope;
-    //return scope.Close(BufferOut->handle_);
-    return scope.Close(Number::New(static_cast<double>(totalBufferSize)));
-}
-
-static Handle<Value> readAddressArg(in_addr& out, const Local<Value>& arg)
-{
-    if(!arg->IsString())
-    {
-        return ThrowNodeError("Expected string argument");
-    }
-
-    String::AsciiValue str(arg->ToString());
-
-    out.s_addr = inet_addr(*str);
-    
-    if(out.s_addr == INADDR_NONE)
-    {
-        return ThrowNodeError("Expected IP-address argument");
-    }
-
-    return Handle<Value>();
-}
-
-static Handle<Value> readPortArg(uint16_t& out, const Local<Value>& arg)
-{
-    if(!arg->IsInt32())
-    {
-        return ThrowNodeError("Expected int argument");
-    }
-
-    // TODO: check for > 16bit?
-    out = static_cast<uint16_t>(arg->Int32Value());
-    return Handle<Value>();
-}
-
-static Handle<Value> readProxyArgs(ProxySpec& out, const Arguments& args, Local<Function>* callback = NULL)
-{
-    if((args.Length() < 7) || (args.Length() > 8))
-    {
-        return ThrowNodeError("proxy requires 7 arguments: aAddr, aPort, bAddr, bPort, nAddr, anPort, bnPort, [callback] ");
-    }
-
-    int i = 0;
-
-    Handle<Value> error;
-    
-    error = readAddressArg(out.aAddr, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.aPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readAddressArg(out.bAddr, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.bPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-
-    error = readAddressArg(out.nAddr, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.anPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-    
-    error = readPortArg(out.bnPort, args[i++]);
-    if(!error.IsEmpty()) { return(error); }
-
-    if(i >= args.Length())
-    {
-        return Handle<Value>();
-    }
-
-    if(callback)
-    {
-        if(!args[i]->IsFunction())
-        {
-            return ThrowNodeError("Expected function argument");
-        }
-
-        *callback = Local<Function>::Cast(args[i++]);
-    }
-
-    return Handle<Value>();
-}
-
-Handle<Value> flushProxies(const Arguments& args) {
-    HandleScope scope;
-    if(args.Length() != 0) {
-        return ThrowNodeError("flush proxies takes no argument");
-    }
-    
-    return scope.Close(Boolean::New(flushProxies()));
-}
-
-Handle<Value> createProxy(const Arguments& args) {
-    HandleScope scope;
-    ProxySpec proxy;
-    Local<Function> callback;
-
-    Handle<Value> error = readProxyArgs(proxy, args, &callback);
-    if(!error.IsEmpty()) { return(error); }
-
-#ifdef ENABLE_ASYNC_PROXY
-    createProxy(proxy, callback);
-#else
-    bool result = createProxy(proxy);
-
-    const unsigned argc = 1;
-    Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(result)) };
-
-    callback->Call(Context::GetCurrent()->Global(), argc, argv);
-#endif
-
-    return scope.Close(Undefined());
-}
-
-Handle<Value> abortProxy(const Arguments& args)
-{
-    HandleScope scope;
-    ProxySpec proxy;
-
-    Handle<Value> error = readProxyArgs(proxy, args);
-    if(!error.IsEmpty()) { return(error); }
-
-    return scope.Close(Boolean::New(abortProxy(proxy)));
-}
-
-Handle<Value> deleteProxy(const Arguments& args)
-{
-    HandleScope scope;
-    ProxySpec proxy;
-    Local<Function> callback;
-
-    Handle<Value> error = readProxyArgs(proxy, args, &callback);
-    if(!error.IsEmpty()) { return(error); }
-
-#ifdef ENABLE_ASYNC_PROXY
-    deleteProxy(proxy, callback);
-#else
-    bool result = deleteProxy(proxy);
-
-    const unsigned argc = 1;
-    Local<Value> argv[argc] = { Local<Value>::New(Boolean::New(result)) };
-
-    callback->Call(Context::GetCurrent()->Global(), argc, argv);
-#endif
-
-    return scope.Close(Undefined());
-}
-#endif // NODE_MINOR_VERSION < 12
+#endif // Node 12
 
 // varint size encoding needed for perl's LZF compression
 // NOTE: I am matching the LZF version but it is wrong for for large packet sizes (e.g. usize <= 0x7fffffff is wrong, varint of 0xffffffff fits in 5 bytes!)
@@ -1912,7 +1948,11 @@ static uint32 GetVarIntLZF(const uint8* src, uint32& csize)
     return(usize);
 }
 
+#if NODE_MAJOR_VERSION >= 12
+extern "C" void init (Local<Object> target)
+#else // Node 10 & 8
 extern "C" void init (Handle<Object> target)
+#endif
 {
 #ifdef ENABLE_PROXY
     initProxy();
