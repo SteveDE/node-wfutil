@@ -105,9 +105,9 @@ struct AsyncProxy
     AsyncProxy() :
         add(false),
         result(false),
-        next(NULL)
+        next(nullptr)
     {
-        async.data = NULL;
+        async.data = nullptr;
     }
 
     ProxySpec spec;
@@ -590,8 +590,8 @@ class AsyncProxyQueue
 {
 public:
     AsyncProxyQueue() :
-        mBegin(NULL),
-        mEnd(NULL)
+        mBegin(nullptr),
+        mEnd(nullptr)
     {
         uv_mutex_init(&mMutex);
         uv_sem_init(&mPending, 0);
@@ -608,7 +608,7 @@ public:
         uv_mutex_lock(&mMutex); 
         READWRITE_BARRIER();
 
-        p->next = NULL;
+        p->next = nullptr;
 
         if(mEnd)
         {
@@ -642,7 +642,7 @@ public:
 
         if(!mBegin)
         {
-            mEnd = NULL;
+            mEnd = nullptr;
         }
 
         READWRITE_BARRIER();
@@ -657,7 +657,7 @@ public:
 
         if(uv_sem_trywait(&mPending))
         {
-            return(NULL);
+            return(nullptr);
         }
 
         uv_mutex_lock(&mMutex); 
@@ -669,7 +669,7 @@ public:
 
         if(!mBegin)
         {
-            mEnd = NULL;
+            mEnd = nullptr;
         }
 
         READWRITE_BARRIER();
@@ -771,7 +771,7 @@ static void proxyLoop(void*)
         {
             std::cerr << "iptc_init: " << iptc_strerror(errno) << "\n";
             first->result = false; 
-            first->next = NULL;
+            first->next = nullptr;
         }
         else
         {
@@ -786,7 +786,7 @@ static void proxyLoop(void*)
             uint64_t batchCutoff = batchStartNS + 2 * (nanoseconds(initEnd) - batchStartNS);
 
             AsyncProxy* ap = first;
-            AsyncProxy* prev = NULL;
+            AsyncProxy* prev = nullptr;
             int n = 0;
 
             do
@@ -796,7 +796,7 @@ static void proxyLoop(void*)
                     prev->next = ap;
                 }
 
-                ap->next = NULL;
+                ap->next = nullptr;
                 prev = ap;
                 ++n;
 
@@ -934,17 +934,17 @@ static void proxyLoop(void*)
 }
 #endif // !COALESCE_PROXY_OPERATION
 
-// TODO: push NULL isn't quit right
-// because tryPop returning NULL is indestinguishable -- need sentinel
+// TODO: push nullptr isn't quit right
+// because tryPop returning nullptr is indestinguishable -- need sentinel
 // static void joinProxyThread()
 // {
-//     sProxyQueue.push(NULL);
+//     sProxyQueue.push(nullptr);
 //     uv_thread_join(&sProxyThread);
 // }
 
 static void initAsyncProxy()
 {
-    uv_thread_create(&sProxyThread, proxyLoop, NULL);
+    uv_thread_create(&sProxyThread, proxyLoop, nullptr);
 }
 
 static bool pushAsyncProxy(const ProxySpec& proxy, const Local<Function>& callback, bool add)
@@ -956,7 +956,7 @@ static bool pushAsyncProxy(const ProxySpec& proxy, const Local<Function>& callba
 
     if(callback.IsEmpty())
     {
-        async->async.data = NULL;
+        async->async.data = nullptr;
     }
     else
     {
@@ -991,7 +991,7 @@ static bool deleteProxy(const ProxySpec& proxy, const Local<Function>& callback)
 #endif // ENABLE_PROXY 
 
 #if NODE_MAJOR_VERSION >= 12
-void ThrowNodeError(Isolate* isolate, const char* what = NULL) {
+void ThrowNodeError(Isolate* isolate, const char* what = nullptr) {
     isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, what, NewStringType::kNormal).ToLocalChecked()));
 }
 
@@ -1298,7 +1298,7 @@ static bool readPortArg(uint16_t& out, const FunctionCallbackInfo<Value>& args, 
     return(true);
 }
 
-static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = NULL)
+static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = nullptr)
 {
     if((args.Length() < 7) || (args.Length() > 8))
     {
@@ -1414,7 +1414,7 @@ void deleteProxy(const FunctionCallbackInfo<Value>& args)
 #endif
 }
 #else // Node 10 & 8
-Handle<Value> ThrowNodeError(const char* what = NULL) {
+Handle<Value> ThrowNodeError(const char* what = nullptr) {
     return Isolate::GetCurrent()->ThrowException(Exception::Error(String::NewFromUtf8(Isolate::GetCurrent(), what)));
 }
 
@@ -1714,7 +1714,7 @@ static bool readPortArg(uint16_t& out, const Local<Value>& arg)
     return(true);
 }
 
-static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = NULL)
+static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& args, Local<Function>* callback = nullptr)
 {
     if((args.Length() < 7) || (args.Length() > 8))
     {
@@ -1726,13 +1726,13 @@ static bool readProxyArgs(ProxySpec& out, const FunctionCallbackInfo<Value>& arg
 
     int i = 0;
 
-    if(!readAddressArg(out.aAddr, args, i++)) { return(false); }
-    if(!readPortArg(out.aPort, args, i++)) { return(false); }
-    if(!readAddressArg(out.bAddr, args, i++)) { return(false); }
-    if(!readPortArg(out.bPort, args, i++)) { return(false); }
-    if(!readAddressArg(out.nAddr, args, i++)) { return(false); }
-    if(!readPortArg(out.anPort, args, i++)) { return(false); }
-    if(!readPortArg(out.bnPort, args, i++)) { return(false); }
+    if(!readAddressArg(out.aAddr, args[i++])) { return(false); }
+    if(!readPortArg(out.aPort, args[i++])) { return(false); }
+    if(!readAddressArg(out.bAddr, args[i++])) { return(false); }
+    if(!readPortArg(out.bPort, args[i++])) { return(false); }
+    if(!readAddressArg(out.nAddr, args[i++])) { return(false); }
+    if(!readPortArg(out.anPort, args[i++])) { return(false); }
+    if(!readPortArg(out.bnPort, args[i++])) { return(false); }
 
     if(i >= args.Length())
     {
